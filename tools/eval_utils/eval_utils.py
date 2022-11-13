@@ -58,8 +58,10 @@ def eval_one_epoch(cfg, model, dataloader, epoch_id, logger, dist_test=False, sa
             batch_dict.update({'temperature': cfg.OPTIMIZATION.DECAY_TEMPERATURE[-1]})
 
         load_data_to_gpu(batch_dict)
-        with torch.no_grad():
-            pred_dicts, ret_dict = model(batch_dict)
+        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU,
+                                                torch.profiler.ProfilerActivity.CUDA]) as prof:
+            with torch.no_grad():
+                pred_dicts, ret_dict = model(batch_dict)
         disp_dict = {}
 
         statistics_info(cfg, ret_dict, metric, disp_dict)
@@ -71,6 +73,9 @@ def eval_one_epoch(cfg, model, dataloader, epoch_id, logger, dist_test=False, sa
         if cfg.LOCAL_RANK == 0:
             progress_bar.set_postfix(disp_dict)
             progress_bar.update()
+
+        if i > 10:
+            break
 
     if cfg.LOCAL_RANK == 0:
         progress_bar.close()
@@ -112,14 +117,16 @@ def eval_one_epoch(cfg, model, dataloader, epoch_id, logger, dist_test=False, sa
     with open(result_dir / 'result.pkl', 'wb') as f:
         pickle.dump(det_annos, f)
 
-    result_str, result_dict = dataset.evaluation(
-        det_annos, class_names,
-        eval_metric=cfg.MODEL.POST_PROCESSING.EVAL_METRIC,
-        output_path=final_output_dir
-    )
+    # result_str, result_dict = dataset.evaluation(
+    #     det_annos, class_names,
+    #     eval_metric=cfg.MODEL.POST_PROCESSING.EVAL_METRIC,
+    #     output_path=final_output_dir
+    # )
+    #
+    # logger.info(result_str)
+    # ret_dict.update(result_dict)
 
-    logger.info(result_str)
-    ret_dict.update(result_dict)
+    prof.export_chrome_trace("trace.json")
 
     logger.info('Result is save to %s' % result_dir)
     logger.info('****************Evaluation done.*****************')

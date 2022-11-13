@@ -6,9 +6,10 @@ from ...utils import box_utils, common_utils
 
 
 class DataProcessor(object):
-    def __init__(self, processor_configs, point_cloud_range, training):
+    def __init__(self, processor_configs, point_cloud_range, training, num_point_features):
         self.point_cloud_range = point_cloud_range
         self.training = training
+        self.num_point_features = num_point_features
         self.mode = 'train' if training else 'test'
         self.grid_size = self.voxel_size = None
         self.data_processor_queue = []
@@ -42,16 +43,20 @@ class DataProcessor(object):
 
     def transform_points_to_voxels(self, data_dict=None, config=None, voxel_generator=None):
         if data_dict is None:
-            try:
-                from spconv.utils import VoxelGeneratorV2 as VoxelGenerator
-            except:
-                from spconv.utils import VoxelGenerator
+            from spconv.utils import Point2VoxelCPU3d as VoxelGenerator
 
+            # voxel_generator = VoxelGenerator(
+            #     voxel_size=config.VOXEL_SIZE,
+            #     point_cloud_range=self.point_cloud_range,
+            #     max_num_points=config.MAX_POINTS_PER_VOXEL,
+            #     max_voxels=config.MAX_NUMBER_OF_VOXELS[self.mode]
+            # )
             voxel_generator = VoxelGenerator(
-                voxel_size=config.VOXEL_SIZE,
-                point_cloud_range=self.point_cloud_range,
-                max_num_points=config.MAX_POINTS_PER_VOXEL,
-                max_voxels=config.MAX_NUMBER_OF_VOXELS[self.mode]
+                vsize_xyz=config.VOXEL_SIZE,
+                coors_range_xyz=self.point_cloud_range,
+                num_point_features=self.num_point_features,
+                max_num_points_per_voxel=config.MAX_POINTS_PER_VOXEL,
+                max_num_voxels=config.MAX_NUMBER_OF_VOXELS[self.mode]
             )
             grid_size = (self.point_cloud_range[3:6] - self.point_cloud_range[0:3]) / np.array(config.VOXEL_SIZE)
             self.grid_size = np.round(grid_size).astype(np.int64)
@@ -59,12 +64,18 @@ class DataProcessor(object):
             return partial(self.transform_points_to_voxels, voxel_generator=voxel_generator)
 
         points = data_dict['points']
-        voxel_output = voxel_generator.generate(points)
-        if isinstance(voxel_output, dict):
-            voxels, coordinates, num_points = \
-                voxel_output['voxels'], voxel_output['coordinates'], voxel_output['num_points_per_voxel']
-        else:
-            voxels, coordinates, num_points = voxel_output
+        # voxel_output = voxel_generator.generate(points)
+        import cumm.tensorview as tv
+        voxel_output = voxel_generator.point_to_voxel(tv.from_numpy(points))
+        # if isinstance(voxel_output, dict):
+        # voxels, coordinates, num_points = \
+        # voxel_output['voxels'], voxel_output['coordinates'], voxel_output['num_points_per_voxel']
+        # else:
+        # voxels, coordinates, num_points = voxel_output
+        tv_voxels, tv_coordinates, tv_num_points = voxel_output
+        voxels = tv_voxels.numpy()
+        coordinates = tv_coordinates.numpy()
+        num_points = tv_num_points.numpy()
 
         if not data_dict['use_lead_xyz']:
             voxels = voxels[..., 3:]  # remove xyz in voxels(N, 3)

@@ -157,9 +157,11 @@ class SparseAttention3d(Attention3d):
         return new_spatial_shape, new_indices, new_map_table
 
     def forward(self, sp_tensor):
-        new_spatial_shape, new_indices, new_map_table = self.downsample(sp_tensor)
+        with torch.profiler.record_function("self.downsample"):
+            new_spatial_shape, new_indices, new_map_table = self.downsample(sp_tensor)
         vx, vy, vz = sp_tensor.voxel_size
         new_voxel_size = [vx * self.strides[0], vy * self.strides[1], vz * self.strides[2]]
+        # gather_dict = self.create_gather_dict(self.attention_modes, sp_tensor.map_table, new_indices, sp_tensor.spatial_shape)
         gather_dict = self.create_gather_dict(self.attention_modes, sp_tensor.map_table, new_indices, sp_tensor.spatial_shape)
 
         voxel_features = sp_tensor.features
