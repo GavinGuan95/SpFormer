@@ -1,5 +1,7 @@
 import torch
 import torch.nn as nn
+import pcdet.models.backbones_3d.mynn_attention as mynn_attention
+import copy
 
 from ...ops.votr_ops import votr_utils
 
@@ -64,7 +66,7 @@ class Attention3d(nn.Module):
         super(Attention3d, self).__init__()
         self.attention_modes = attention_modes
 
-        self.mhead_attention = nn.MultiheadAttention(
+        self.mhead_attention = mynn_attention.MultiheadAttention(
                 embed_dim= input_channels,
                 num_heads= num_heads,
                 dropout= dropout,
@@ -157,6 +159,84 @@ class SparseAttention3d(Attention3d):
         return new_spatial_shape, new_indices, new_map_table
 
     def forward(self, sp_tensor):
+        sp_tensor_copy = copy.deepcopy(sp_tensor)
+        sp_tensor_copy.features = sp_tensor_copy.features[0:1]
+        sp_tensor_copy.indices = sp_tensor_copy.indices[0:1]
+        aa, bb, cc = self.downsample(sp_tensor_copy)
+        with torch.profiler.record_function("self.downsample"):
+            new_spatial_shape, new_indices, new_map_table = self.downsample(sp_tensor)
+        vx, vy, vz = sp_tensor.voxel_size
+        new_voxel_size = [vx * self.strides[0], vy * self.strides[1], vz * self.strides[2]]
+        # gather_dict = self.create_gather_dict(self.attention_modes, sp_tensor.map_table, new_indices, sp_tensor.spatial_shape)
+        gather_dict = self.create_gather_dict(self.attention_modes, sp_tensor.map_table, new_indices, sp_tensor.spatial_shape)
+
+        voxel_features = sp_tensor.features
+        v_bs_cnt = self.with_bs_cnt(sp_tensor.indices, sp_tensor.batch_size)
+        k_bs_cnt = self.with_bs_cnt(new_indices, sp_tensor.batch_size)
+
+        a_key_indices, a_key_mask = [], []
+        for attention_idx, attetion_mode in enumerate(self.attention_modes):
+            key_indices, key_mask = gather_dict[attetion_mode.NAME]
+            a_key_indices.append(key_indices)
+            a_key_mask.append(key_mask)
+
+        key_indices = torch.cat(a_key_indices, dim = 1)
+        key_mask = torch.cat(a_key_mask, dim = 1)
+
+        key_features = votr_utils.grouping_operation(voxel_features, v_bs_cnt, key_indices, k_bs_cnt)
+        voxel_coords = self.with_coords(sp_tensor.indices, sp_tensor.point_cloud_range, sp_tensor.voxel_size)
+        key_coords = votr_utils.grouping_operation(voxel_coords, v_bs_cnt, key_indices, k_bs_cnt)
+
+        voxel_features_at_keys = votr_utils.grouping_operation(voxel_features, v_bs_cnt, key_indices, k_bs_cnt)
+        voxel_coords = self.with_coords(sp_tensor.indices, sp_tensor.point_cloud_range, sp_tensor.voxel_size)
+
+
+        query_coords = self.with_coords(new_indices, sp_tensor.point_cloud_range, new_voxel_size)
+        if self.use_pooled_features:
+            pooled_query_features = key_features.max(dim=-1)[0]
+            pooled_query_features = pooled_query_features.unsqueeze(0)
+            if self.use_no_query_coords:
+                query_features = pooled_query_features
+            else:
+                query_features = self.q_pos_proj(query_coords).unsqueeze(0)
+                query_features = query_features + pooled_query_features
+        else:
+            query_features = self.q_pos_proj(query_coords).unsqueeze(0)
+
+        if self.use_relative_coords:
+            key_coords = key_coords - query_coords.unsqueeze(-1) # (N, 3, size)
+
+        key_pos_emb = self.k_pos_proj(key_coords)
+        key_features = key_features + key_pos_emb
+        key_features = key_features.permute(2, 0, 1).contiguous() # (size, N1+N2, C)
+
+        attend_features, attend_weights = self.mhead_attention(
+            query = query_features,
+            key = key_features,
+            value = key_features,
+            key_padding_mask = key_mask,
+        )
+
+        attend_features = self.drop_out(attend_features)
+
+        new_features = attend_features.squeeze(0)
+        act_features = self.linear2(self.dropout1(self.activation(self.linear1(new_features))))
+        new_features = new_features + self.dropout2(act_features)
+        new_features = self.norm(new_features)
+        new_features = self.output_layer(new_features)
+
+        # update sp_tensor
+        sp_tensor.features = new_features
+        sp_tensor.indices = new_indices
+        sp_tensor.spatial_shape = new_spatial_shape
+        sp_tensor.voxel_size = new_voxel_size
+
+        del sp_tensor.map_table
+        sp_tensor.gather_dict = None
+        sp_tensor.map_table = new_map_table
+        return sp_tensor
+
+    def forward_old(self, sp_tensor):
         with torch.profiler.record_function("self.downsample"):
             new_spatial_shape, new_indices, new_map_table = self.downsample(sp_tensor)
         vx, vy, vz = sp_tensor.voxel_size
