@@ -41,8 +41,9 @@ class BuildHashTable(Function):
         x_max, y_max, z_max = spatial_shape
         num_voxels = voxel_indices.shape[0]
         assert voxel_indices.is_contiguous()
-        dense_map = torch.zeros((batch_size, hash_size, 2)).int().fill_(-1)
-        dense_map = dense_map.to(voxel_indices.device)
+        # dense_map = torch.zeros((batch_size, hash_size, 2)).int().fill_(-1)
+        # dense_map = dense_map.to(voxel_indices.device)
+        dense_map = torch.full((batch_size, hash_size, 2), -1, dtype=torch.int, device=voxel_indices.device)
 
         votr.build_mapping_with_hash_wrapper(x_max, y_max, z_max, num_voxels, hash_size, voxel_indices, v_bs_cnt, dense_map)
         return dense_map
@@ -101,11 +102,13 @@ class HashTableDownSample(Function):
         """
         x_stride, y_stride, z_stride = strides
         x_max, y_max, z_max = spatial_shape
-        dense_map = torch.zeros((batch_size, hash_size, 2)).int().fill_(-1)
-        dense_map = dense_map.to(voxel_indices.device)
+        # dense_map = torch.zeros((batch_size, hash_size, 2)).int().fill_(-1)
+        # dense_map = dense_map.to(voxel_indices.device)
+        dense_map = torch.full((batch_size, hash_size, 2), -1, dtype=torch.int, device=voxel_indices.device)
         num_voxels = voxel_indices.shape[0]
         assert voxel_indices.is_contiguous()
-        ds_voxel_indices = torch.zeros((batch_size, num_ds_voxels, 3)).int().fill_(-1).to(voxel_indices.device)
+        # ds_voxel_indices = torch.zeros((batch_size, num_ds_voxels, 3)).int().fill_(-1).to(voxel_indices.device)
+        ds_voxel_indices = torch.full((batch_size, num_ds_voxels, 3), -1, dtype=torch.int, device=voxel_indices.device)
         vcount = torch.zeros(batch_size).int().to(voxel_indices.device)
         votr.downsample_with_hash_wrapper(x_max, y_max, z_max, x_stride, y_stride, z_stride,
                                                 num_voxels, num_ds_voxels, hash_size,
@@ -126,6 +129,137 @@ class HashTableDownSample(Function):
         return None, None, None, None
 
 hash_table_down_sample = HashTableDownSample.apply
+
+class HashTableDownSampleWithFeature(Function):
+    @staticmethod
+    def forward(ctx, strides, num_ds_voxels, batch_size, hash_size, spatial_shape, voxel_indices):
+        """
+        Args:
+            ctx:
+            voxel_indices: (num_voxels, 4) (bs_idx, z, y, x)
+        Returns:
+        """
+        x_stride, y_stride, z_stride = strides
+        x_max, y_max, z_max = spatial_shape
+        # dense_map = torch.zeros((batch_size, hash_size, 2)).int().fill_(-1)
+        # dense_map = dense_map.to(voxel_indices.device)
+        dense_map = torch.full((batch_size, hash_size, 2), -1, dtype=torch.int, device=voxel_indices.device)
+        num_voxels = voxel_indices.shape[0]
+        assert voxel_indices.is_contiguous()
+        # ds_voxel_indices = torch.zeros((batch_size, num_ds_voxels, 3)).int().fill_(-1).to(voxel_indices.device)
+        ds_voxel_indices_features = torch.full((batch_size, num_ds_voxels, 3+1), -1, dtype=torch.int, device=voxel_indices.device)
+        vcount = torch.zeros(batch_size).int().to(voxel_indices.device)
+        votr.downsample_with_hash_with_features_wrapper(x_max, y_max, z_max, x_stride, y_stride, z_stride,
+                                                num_voxels, num_ds_voxels, hash_size,
+                                                voxel_indices, ds_voxel_indices_features, dense_map, vcount)
+        ds_voxel_list = []
+        ds_voxel_old_feature_idx_list = []
+        for i in range(batch_size):
+            ds_voxel = ds_voxel_indices_features[i]
+            ds_voxel = ds_voxel[ds_voxel[:, 0] >= 0] # not -1
+            bs_idx = torch.zeros((ds_voxel.shape[0], 1)).int().fill_(i).to(voxel_indices.device)
+            ds_voxel_old_feature_idx_list.append(ds_voxel[:, 3])
+            ds_voxel_list.append(torch.cat([bs_idx, ds_voxel[:, :3]], dim = 1))
+
+        output_voxels = torch.cat(ds_voxel_list, dim = 0).contiguous()
+        output_voxel_old_feature_idx = torch.cat(ds_voxel_old_feature_idx_list, dim = 0).contiguous()
+        return output_voxels, dense_map, output_voxel_old_feature_idx
+
+    @staticmethod
+    def backward(ctx, a=None):
+        return None, None, None, None
+
+hash_table_down_sample_with_feature = HashTableDownSampleWithFeature.apply
+
+class HashTableDownSampleWithFeatureReuseDensemap(Function):
+    @staticmethod
+    def forward(ctx, strides, accu_strides, num_ds_voxels, batch_size, hash_size, spatial_shape, voxel_indices, dense_map):
+        """
+        Args:
+            ctx:
+            voxel_indices: (num_voxels, 4) (bs_idx, z, y, x)
+            dense_map: (batch_size, hash_size, 3)
+        Returns:
+        """
+        x_stride, y_stride, z_stride = strides
+        accu_x_stride, accu_y_stride, accu_z_stride = accu_strides
+        x_max, y_max, z_max = spatial_shape
+        # dense_map = torch.zeros((batch_size, hash_size, 2)).int().fill_(-1)
+        # dense_map = dense_map.to(voxel_indices.device)
+        # dense_map = torch.full((batch_size, hash_size, 2), -1, dtype=torch.int, device=voxel_indices.device)
+        assert dense_map.device == voxel_indices.device
+        num_voxels = voxel_indices.shape[0]
+        assert voxel_indices.is_contiguous()
+        # ds_voxel_indices = torch.zeros((batch_size, num_ds_voxels, 3)).int().fill_(-1).to(voxel_indices.device)
+        ds_voxel_indices_features = torch.full((batch_size, num_ds_voxels, 3+1), -1, dtype=torch.int, device=voxel_indices.device)
+        vcount = torch.zeros(batch_size).int().to(voxel_indices.device)
+        votr.downsample_with_hash_with_features_reuse_densemap_wrapper(x_max, y_max, z_max, x_stride, y_stride, z_stride,
+                                                accu_x_stride, accu_y_stride, accu_z_stride,
+                                                num_voxels, num_ds_voxels, hash_size,
+                                                voxel_indices, ds_voxel_indices_features, dense_map, vcount)
+        ds_voxel_list = []
+        ds_voxel_old_feature_idx_list = []
+        for i in range(batch_size):
+            ds_voxel = ds_voxel_indices_features[i]
+            ds_voxel = ds_voxel[ds_voxel[:, 0] >= 0] # not -1
+            bs_idx = torch.zeros((ds_voxel.shape[0], 1)).int().fill_(i).to(voxel_indices.device)
+            ds_voxel_old_feature_idx_list.append(ds_voxel[:, 3])
+            ds_voxel_list.append(torch.cat([bs_idx, ds_voxel[:, :3]], dim = 1))
+
+        output_voxels = torch.cat(ds_voxel_list, dim = 0).contiguous()
+        output_voxel_old_feature_idx = torch.cat(ds_voxel_old_feature_idx_list, dim = 0).contiguous()
+        return output_voxels, dense_map, output_voxel_old_feature_idx
+
+    @staticmethod
+    def backward(ctx, a=None):
+        return None, None, None, None
+
+hash_table_down_sample_with_feature_reuse_densemap = HashTableDownSampleWithFeatureReuseDensemap.apply
+
+class HashTableDownSampleWithFeatureReuseDensemapStridetag(Function):
+    @staticmethod
+    def forward(ctx, strides, accu_strides, num_ds_voxels, batch_size, hash_size, spatial_shape, voxel_indices, dense_map):
+        """
+        Args:
+            ctx:
+            voxel_indices: (num_voxels, 4) (bs_idx, z, y, x)
+            dense_map: (batch_size, hash_size, 3)
+        Returns:
+        """
+        x_stride, y_stride, z_stride = strides
+        accu_x_stride, accu_y_stride, accu_z_stride = accu_strides
+        x_max, y_max, z_max = spatial_shape
+        # dense_map = torch.zeros((batch_size, hash_size, 2)).int().fill_(-1)
+        # dense_map = dense_map.to(voxel_indices.device)
+        # dense_map = torch.full((batch_size, hash_size, 2), -1, dtype=torch.int, device=voxel_indices.device)
+        assert dense_map.device == voxel_indices.device
+        num_voxels = voxel_indices.shape[0]
+        assert voxel_indices.is_contiguous()
+        # ds_voxel_indices = torch.zeros((batch_size, num_ds_voxels, 3)).int().fill_(-1).to(voxel_indices.device)
+        ds_voxel_indices_features = torch.full((batch_size, num_ds_voxels, 3+1), -1, dtype=torch.int, device=voxel_indices.device)
+        vcount = torch.zeros(batch_size).int().to(voxel_indices.device)
+        votr.downsample_with_hash_with_features_reuse_densemap_stridetag_wrapper(x_max.item(), y_max.item(), z_max.item(), x_stride, y_stride, z_stride,
+                                                accu_x_stride, accu_y_stride, accu_z_stride,
+                                                num_voxels, num_ds_voxels, hash_size,
+                                                voxel_indices, ds_voxel_indices_features, dense_map, vcount)
+        ds_voxel_list = []
+        ds_voxel_old_feature_idx_list = []
+        for i in range(batch_size):
+            ds_voxel = ds_voxel_indices_features[i]
+            ds_voxel = ds_voxel[ds_voxel[:, 0] >= 0] # not -1
+            bs_idx = torch.zeros((ds_voxel.shape[0], 1)).int().fill_(i).to(voxel_indices.device)
+            ds_voxel_old_feature_idx_list.append(ds_voxel[:, 3])
+            ds_voxel_list.append(torch.cat([bs_idx, ds_voxel[:, :3]], dim = 1))
+
+        output_voxels = torch.cat(ds_voxel_list, dim = 0).contiguous()
+        output_voxel_old_feature_idx = torch.cat(ds_voxel_old_feature_idx_list, dim = 0).contiguous()
+        return output_voxels, dense_map, output_voxel_old_feature_idx
+
+    @staticmethod
+    def backward(ctx, a=None):
+        return None, None, None, None
+
+hash_table_down_sample_with_feature_reuse_densemap_stridetag = HashTableDownSampleWithFeatureReuseDensemapStridetag.apply
 
 class SparseLocalAttentionTensorIndices(Function):
 
@@ -173,7 +307,8 @@ class SparseLocalAttentionHashIndices(Function):
         num_voxels = voxel_indices.shape[0]
         assert voxel_indices.is_contiguous()
 
-        attend_indices = torch.zeros((num_voxels, attend_size)).int().fill_(-1).to(voxel_indices.device)
+        # attend_indices = torch.zeros((num_voxels, attend_size)).int().fill_(-1).to(voxel_indices.device)
+        attend_indices = torch.full((num_voxels, attend_size), -1, dtype=torch.int, device=voxel_indices.device)
 
         votr.sparse_local_attention_with_hash_wrapper(x_max, y_max, z_max, x_stride, y_stride, z_stride,
                                                         num_voxels, attend_size, attend_range, hash_size,
@@ -233,10 +368,11 @@ class SparseStridedAttentionHashIndices(Function):
         batch_size, hash_size, _ = dense_map.shape
         num_voxels = voxel_indices.shape[0]
         assert voxel_indices.is_contiguous()
-        range_spec = torch.tensor(range_spec).int().to(voxel_indices.device)
+        # range_spec = torch.tensor(range_spec).int().to(voxel_indices.device)
+        range_spec = torch.tensor(range_spec, dtype=torch.int, device=voxel_indices.device)
         num_range = range_spec.shape[0]
-        attend_indices = torch.zeros((num_voxels, attend_size)).int().fill_(-1).to(voxel_indices.device)
-
+        # attend_indices = torch.zeros((num_voxels, attend_size)).int().fill_(-1).to(voxel_indices.device)
+        attend_indices = torch.full((num_voxels, attend_size), -1, dtype=torch.int, device=voxel_indices.device)
         votr.sparse_strided_attention_with_hash_wrapper(x_max, y_max, z_max, x_stride, y_stride, z_stride,
                                                             num_voxels, attend_size, num_range, hash_size,
                                                             attend_indices, voxel_indices,
@@ -293,7 +429,8 @@ class SubMLocalAttentionHashIndices(Function):
         num_voxels = voxel_indices.shape[0]
         assert voxel_indices.is_contiguous()
 
-        attend_indices = torch.zeros((num_voxels, attend_size)).int().fill_(-1).to(voxel_indices.device)
+        # attend_indices = torch.zeros((num_voxels, attend_size)).int().fill_(-1).to(voxel_indices.device)
+        attend_indices = torch.full((num_voxels, attend_size), -1, dtype=torch.int, device=voxel_indices.device)
 
         votr.subm_local_attention_with_hash_wrapper(x_max, y_max, z_max,
                                                         num_voxels, attend_size, attend_range, hash_size,
@@ -349,9 +486,11 @@ class SubMStridedAttentionHashIndices(Function):
         batch_size, hash_size, _ = dense_map.shape
         num_voxels = voxel_indices.shape[0]
         assert voxel_indices.is_contiguous()
-        range_spec = torch.tensor(range_spec).int().to(voxel_indices.device)
+        # range_spec = torch.tensor(range_spec).int().to(voxel_indices.device)
+        range_spec = torch.tensor(range_spec, dtype=torch.int, device=voxel_indices.device)
         num_range = range_spec.shape[0]
-        attend_indices = torch.zeros((num_voxels, attend_size)).int().fill_(-1).to(voxel_indices.device)
+        # attend_indices = torch.zeros((num_voxels, attend_size)).int().fill_(-1).to(voxel_indices.device)
+        attend_indices = torch.full((num_voxels, attend_size), -1, dtype=torch.int, device=voxel_indices.device)
 
         votr.subm_strided_attention_with_hash_wrapper(x_max, y_max, z_max,
                                                             num_voxels, attend_size, num_range, hash_size,
@@ -364,6 +503,72 @@ class SubMStridedAttentionHashIndices(Function):
         return None, None, None, None, None
 
 subm_strided_attention_hash_indices = SubMStridedAttentionHashIndices.apply
+
+class SubMStridedAttentionHashIndicesReuseDensemap(Function):
+
+    @staticmethod
+    def forward(ctx, spatial_shape, attend_size, range_spec, dense_map, voxel_indices, accu_strides):
+        """
+        Args:
+            ctx:
+            voxel_indices: (num_voxels, 4) (bs_idx, z, y, x)
+        Returns:
+        """
+        accu_x_stride, accu_y_stride, accu_z_stride = accu_strides
+        x_max, y_max, z_max = spatial_shape
+        batch_size, hash_size, _ = dense_map.shape
+        num_voxels = voxel_indices.shape[0]
+        assert voxel_indices.is_contiguous()
+        # range_spec = torch.tensor(range_spec).int().to(voxel_indices.device)
+        range_spec = torch.tensor(range_spec, dtype=torch.int, device=voxel_indices.device)
+        num_range = range_spec.shape[0]
+        # attend_indices = torch.zeros((num_voxels, attend_size)).int().fill_(-1).to(voxel_indices.device)
+        attend_indices = torch.full((num_voxels, attend_size), -1, dtype=torch.int, device=voxel_indices.device)
+
+        votr.subm_strided_attention_with_hash_reuse_densemap_wrapper(x_max, y_max, z_max, accu_x_stride, accu_y_stride, accu_z_stride,
+                                                            num_voxels, attend_size, num_range, hash_size,
+                                                            attend_indices, voxel_indices,
+                                                            dense_map, range_spec)
+        return attend_indices
+
+    @staticmethod
+    def backward(ctx, a=None):
+        return None, None, None, None, None
+
+subm_strided_attention_hash_indices_reuse_densemap = SubMStridedAttentionHashIndicesReuseDensemap.apply
+
+class SubMStridedAttentionHashIndicesReuseDensemapStridetag(Function):
+
+    @staticmethod
+    def forward(ctx, spatial_shape, attend_size, range_spec, dense_map, voxel_indices, accu_strides):
+        """
+        Args:
+            ctx:
+            voxel_indices: (num_voxels, 4) (bs_idx, z, y, x)
+        Returns:
+        """
+        accu_x_stride, accu_y_stride, accu_z_stride = accu_strides
+        x_max, y_max, z_max = spatial_shape
+        batch_size, hash_size, _ = dense_map.shape
+        num_voxels = voxel_indices.shape[0]
+        assert voxel_indices.is_contiguous()
+        # range_spec = torch.tensor(range_spec).int().to(voxel_indices.device)
+        range_spec = torch.tensor(range_spec, dtype=torch.int, device=voxel_indices.device)
+        num_range = range_spec.shape[0]
+        # attend_indices = torch.zeros((num_voxels, attend_size)).int().fill_(-1).to(voxel_indices.device)
+        attend_indices = torch.full((num_voxels, attend_size), -1, dtype=torch.int, device=voxel_indices.device)
+
+        votr.subm_strided_attention_with_hash_reuse_densemap_stridetag_wrapper(x_max, y_max, z_max, accu_x_stride, accu_y_stride, accu_z_stride,
+                                                            num_voxels, attend_size, num_range, hash_size,
+                                                            attend_indices, voxel_indices,
+                                                            dense_map, range_spec)
+        return attend_indices
+
+    @staticmethod
+    def backward(ctx, a=None):
+        return None, None, None, None, None
+
+subm_strided_attention_hash_indices_reuse_densemap_stridetag = SubMStridedAttentionHashIndicesReuseDensemapStridetag.apply
 
 class GroupingOperation(Function):
 

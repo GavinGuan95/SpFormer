@@ -19,7 +19,7 @@ def statistics_info(cfg, ret_dict, metric, disp_dict):
         '(%d, %d) / %d' % (metric['recall_roi_%s' % str(min_thresh)], metric['recall_rcnn_%s' % str(min_thresh)], metric['gt_num'])
 
 
-def eval_one_epoch(cfg, model, dataloader, epoch_id, logger, dist_test=False, save_to_file=False, result_dir=None):
+def eval_one_epoch(cfg, model, dataloader, epoch_id, logger, dist_test=False, save_to_file=False, result_dir=None, tb_dir=None):
     result_dir.mkdir(parents=True, exist_ok=True)
 
     final_output_dir = result_dir / 'final_result' / 'data'
@@ -51,6 +51,15 @@ def eval_one_epoch(cfg, model, dataloader, epoch_id, logger, dist_test=False, sa
     if cfg.LOCAL_RANK == 0:
         progress_bar = tqdm.tqdm(total=len(dataloader), leave=True, desc='eval', dynamic_ncols=True)
     start_time = time.time()
+    # with torch.profiler.profile(
+    #         schedule=torch.profiler.schedule(
+    #             wait=2,
+    #             warmup=2,
+    #             active=6,
+    #             repeat=1),
+    #         on_trace_ready=torch.profiler.tensorboard_trace_handler(tb_dir),
+    #         # with_trace=True
+    # ) as profiler:
     for i, batch_dict in enumerate(dataloader):
 
         # add temperature for adpative radius learning
@@ -58,10 +67,10 @@ def eval_one_epoch(cfg, model, dataloader, epoch_id, logger, dist_test=False, sa
             batch_dict.update({'temperature': cfg.OPTIMIZATION.DECAY_TEMPERATURE[-1]})
 
         load_data_to_gpu(batch_dict)
-        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU,
-                                                torch.profiler.ProfilerActivity.CUDA]) as prof:
-            with torch.no_grad():
-                pred_dicts, ret_dict = model(batch_dict)
+        # with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU,
+        #                                         torch.profiler.ProfilerActivity.CUDA]) as prof:
+        with torch.no_grad():
+            pred_dicts, ret_dict = model(batch_dict)
         disp_dict = {}
 
         statistics_info(cfg, ret_dict, metric, disp_dict)
@@ -70,12 +79,13 @@ def eval_one_epoch(cfg, model, dataloader, epoch_id, logger, dist_test=False, sa
             output_path=final_output_dir if save_to_file else None
         )
         det_annos += annos
+        # profiler.step()  ##
         if cfg.LOCAL_RANK == 0:
             progress_bar.set_postfix(disp_dict)
             progress_bar.update()
 
-        if i > 10:
-            break
+        # if i > 10:
+        #     break
 
     if cfg.LOCAL_RANK == 0:
         progress_bar.close()
@@ -87,7 +97,9 @@ def eval_one_epoch(cfg, model, dataloader, epoch_id, logger, dist_test=False, sa
 
     logger.info('*************** Performance of EPOCH %s *****************' % epoch_id)
     sec_per_example = (time.time() - start_time) / len(dataloader.dataset)
+    votr_sec_per_example = model.votr_time / len(dataloader.dataset)
     logger.info('Generate label finished(sec_per_example: %.4f second).' % sec_per_example)
+    logger.info('Generate label finished(votr_sec_per_example: %.4f second).' % votr_sec_per_example)
 
     if cfg.LOCAL_RANK != 0:
         return {}
@@ -126,7 +138,7 @@ def eval_one_epoch(cfg, model, dataloader, epoch_id, logger, dist_test=False, sa
     # logger.info(result_str)
     # ret_dict.update(result_dict)
 
-    prof.export_chrome_trace("trace.json")
+    # prof.export_chrome_trace("trace.json")
 
     logger.info('Result is save to %s' % result_dir)
     logger.info('****************Evaluation done.*****************')

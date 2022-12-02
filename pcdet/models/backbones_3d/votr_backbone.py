@@ -3,6 +3,7 @@ import torch.nn as nn
 
 from ...ops.votr_ops import votr_utils
 
+profiling = False
 def scatter_nd(indices, updates, shape):
     """pytorch edition of tensorflow scatter_nd.
     this function don't contain except handle code. so use this carefully
@@ -113,6 +114,7 @@ class SparseAttention3d(Attention3d):
         self.use_no_query_coords = use_no_query_coords
 
         self.strides = strides
+        self.accu_strides = [1, 1, 1]
         self.num_ds_voxels = num_ds_voxels
 
         self.norm = nn.BatchNorm1d(input_channels)
@@ -126,6 +128,27 @@ class SparseAttention3d(Attention3d):
             nn.ReLU(),
         )
 
+    # @torch.no_grad()
+    # def create_gather_dict(self, attention_modes, map_table, voxel_indices, spatial_shape):
+    #     _gather_dict = {}
+    #     for attention_mode in attention_modes:
+    #         if attention_mode.NAME == 'LocalAttention':
+    #             attend_size = attention_mode.SIZE
+    #             attend_range = attention_mode.RANGE
+    #             _gather_indices = votr_utils.sparse_local_attention_hash_indices(spatial_shape, attend_size, attend_range, self.strides, map_table, voxel_indices)
+    #         elif attention_mode.NAME == 'StridedAttention':
+    #             attend_size = attention_mode.SIZE
+    #             range_spec = attention_mode.RANGE_SPEC
+    #             _gather_indices = votr_utils.sparse_strided_attention_hash_indices(spatial_shape, attend_size, range_spec, self.strides, map_table, voxel_indices)
+    #         else:
+    #             raise NotImplementedError
+    #
+    #         _gather_mask = (_gather_indices < 0)
+    #         #_gather_indices[_gather_indices < 0] = 0
+    #         _gather_dict[attention_mode.NAME] = [_gather_indices, _gather_mask]
+    #
+    #     return _gather_dict
+
     @torch.no_grad()
     def create_gather_dict(self, attention_modes, map_table, voxel_indices, spatial_shape):
         _gather_dict = {}
@@ -133,16 +156,21 @@ class SparseAttention3d(Attention3d):
             if attention_mode.NAME == 'LocalAttention':
                 attend_size = attention_mode.SIZE
                 attend_range = attention_mode.RANGE
-                _gather_indices = votr_utils.sparse_local_attention_hash_indices(spatial_shape, attend_size, attend_range, self.strides, map_table, voxel_indices)
+                _gather_indices = votr_utils.subm_local_attention_hash_indices(spatial_shape, attend_size, attend_range,
+                                                                               map_table, voxel_indices)
             elif attention_mode.NAME == 'StridedAttention':
                 attend_size = attention_mode.SIZE
                 range_spec = attention_mode.RANGE_SPEC
-                _gather_indices = votr_utils.sparse_strided_attention_hash_indices(spatial_shape, attend_size, range_spec, self.strides, map_table, voxel_indices)
+                # _gather_indices = votr_utils.subm_strided_attention_hash_indices(spatial_shape, attend_size, range_spec,
+                #                                                                  map_table, voxel_indices)
+                _gather_indices = votr_utils.subm_strided_attention_hash_indices_reuse_densemap_stridetag(spatial_shape, attend_size, range_spec,
+                                                                                 map_table, voxel_indices, self.accu_strides)
+                # import pdb; pdb.set_trace()
             else:
                 raise NotImplementedError
 
             _gather_mask = (_gather_indices < 0)
-            #_gather_indices[_gather_indices < 0] = 0
+            # _gather_indices[_gather_indices < 0] = 0
             _gather_dict[attention_mode.NAME] = [_gather_indices, _gather_mask]
 
         return _gather_dict
@@ -153,18 +181,45 @@ class SparseAttention3d(Attention3d):
         y_shape = sp_tensor.spatial_shape[1] // self.strides[1]
         z_shape = sp_tensor.spatial_shape[2] // self.strides[2]
         new_spatial_shape = [x_shape, y_shape, z_shape]
-        new_indices, new_map_table = votr_utils.hash_table_down_sample(self.strides, self.num_ds_voxels, sp_tensor.batch_size, sp_tensor.hash_size, new_spatial_shape, sp_tensor.indices)
-        return new_spatial_shape, new_indices, new_map_table
+        # new_indices, new_map_table = votr_utils.hash_table_down_sample(self.strides, self.num_ds_voxels, sp_tensor.batch_size, sp_tensor.hash_size, new_spatial_shape, sp_tensor.indices)
+        new_indices, new_map_table, old_feature_idx = votr_utils.hash_table_down_sample_with_feature(self.strides, self.num_ds_voxels, sp_tensor.batch_size, sp_tensor.hash_size, new_spatial_shape, sp_tensor.indices)
+        # return new_spatial_shape, new_indices, new_map_table
+        return new_spatial_shape, new_indices, new_map_table, old_feature_idx
+
+    @torch.no_grad()
+    def downsample_reuse_densemap(self, sp_tensor):
+        x_shape = sp_tensor.spatial_shape[0] // self.strides[0]
+        y_shape = sp_tensor.spatial_shape[1] // self.strides[1]
+        z_shape = sp_tensor.spatial_shape[2] // self.strides[2]
+        new_spatial_shape = [x_shape, y_shape, z_shape]
+        self.accu_strides = [accu_s*s for accu_s, s in zip(self.accu_strides, self.strides)]
+        # new_indices, new_map_table = votr_utils.hash_table_down_sample(self.strides, self.num_ds_voxels, sp_tensor.batch_size, sp_tensor.hash_size, new_spatial_shape, sp_tensor.indices)
+        new_indices, new_map_table, old_feature_idx = votr_utils.hash_table_down_sample_with_feature_reuse_densemap_stridetag(self.strides, self.accu_strides, self.num_ds_voxels, sp_tensor.batch_size, sp_tensor.hash_size, new_spatial_shape, sp_tensor.indices, sp_tensor.map_table)
+        # import pdb; pdb.set_trace()
+        # return new_spatial_shape, new_indices, new_map_table
+        return new_spatial_shape, new_indices, new_map_table, old_feature_idx
 
     def forward(self, sp_tensor):
-        with torch.profiler.record_function("self.downsample"):
-            new_spatial_shape, new_indices, new_map_table = self.downsample(sp_tensor)
+        if profiling:
+            with torch.profiler.record_function("self.downsample"):
+                # new_spatial_shape, new_indices, new_map_table = self.downsample(sp_tensor)
+                new_spatial_shape, new_indices, new_map_table, old_feature_idx = self.downsample(sp_tensor)
+        else:
+            # new_spatial_shape, new_indices, new_map_table = self.downsample(sp_tensor)
+            new_spatial_shape, new_indices, new_map_table, old_feature_idx = self.downsample_reuse_densemap(sp_tensor)
         vx, vy, vz = sp_tensor.voxel_size
         new_voxel_size = [vx * self.strides[0], vy * self.strides[1], vz * self.strides[2]]
         # gather_dict = self.create_gather_dict(self.attention_modes, sp_tensor.map_table, new_indices, sp_tensor.spatial_shape)
-        gather_dict = self.create_gather_dict(self.attention_modes, sp_tensor.map_table, new_indices, sp_tensor.spatial_shape)
+        if profiling:
+            with torch.profiler.record_function("self.create_gather_dict"):
+                # gather_dict = self.create_gather_dict(self.attention_modes, sp_tensor.map_table, new_indices, sp_tensor.spatial_shape)
+                gather_dict = self.create_gather_dict(self.attention_modes, new_map_table, new_indices, new_spatial_shape)
+        else:
+            # gather_dict = self.create_gather_dict(self.attention_modes, sp_tensor.map_table, new_indices, sp_tensor.spatial_shape)
+            gather_dict = self.create_gather_dict(self.attention_modes, new_map_table, new_indices, new_spatial_shape)
 
         voxel_features = sp_tensor.features
+        new_features = voxel_features[old_feature_idx.long()]
         v_bs_cnt = self.with_bs_cnt(sp_tensor.indices, sp_tensor.batch_size)
         k_bs_cnt = self.with_bs_cnt(new_indices, sp_tensor.batch_size)
 
@@ -175,12 +230,22 @@ class SparseAttention3d(Attention3d):
             a_key_mask.append(key_mask)
 
         key_indices = torch.cat(a_key_indices, dim = 1)
+
         key_mask = torch.cat(a_key_mask, dim = 1)
+        if profiling:
+            with torch.profiler.record_function("votr_utils.grouping_operation"):
+                key_features = votr_utils.grouping_operation(voxel_features, v_bs_cnt, key_indices, k_bs_cnt)
+                voxel_coords = self.with_coords(sp_tensor.indices, sp_tensor.point_cloud_range, sp_tensor.voxel_size)
+                key_coords = votr_utils.grouping_operation(voxel_coords, v_bs_cnt, key_indices, k_bs_cnt)
+        else:
+            # key_features = votr_utils.grouping_operation(voxel_features, v_bs_cnt, key_indices, k_bs_cnt)
+            key_features = votr_utils.grouping_operation(new_features, k_bs_cnt, key_indices, k_bs_cnt)
+            # voxel_coords = self.with_coords(sp_tensor.indices, sp_tensor.point_cloud_range, sp_tensor.voxel_size)
+            new_voxel_coords = self.with_coords(new_indices, sp_tensor.point_cloud_range, new_voxel_size)
+            # key_coords = votr_utils.grouping_operation(voxel_coords, v_bs_cnt, key_indices, k_bs_cnt)
+            key_coords = votr_utils.grouping_operation(new_voxel_coords, k_bs_cnt, key_indices, k_bs_cnt)
 
-        key_features = votr_utils.grouping_operation(voxel_features, v_bs_cnt, key_indices, k_bs_cnt)
-        voxel_coords = self.with_coords(sp_tensor.indices, sp_tensor.point_cloud_range, sp_tensor.voxel_size)
-        key_coords = votr_utils.grouping_operation(voxel_coords, v_bs_cnt, key_indices, k_bs_cnt)
-
+        # import pdb; pdb.set_trace()
         query_coords = self.with_coords(new_indices, sp_tensor.point_cloud_range, new_voxel_size)
 
         if self.use_pooled_features:
@@ -201,21 +266,37 @@ class SparseAttention3d(Attention3d):
         key_features = key_features + key_pos_emb
         key_features = key_features.permute(2, 0, 1).contiguous() # (size, N1+N2, C)
 
-        attend_features, attend_weights = self.mhead_attention(
-            query = query_features,
-            key = key_features,
-            value = key_features,
-            key_padding_mask = key_mask,
-        )
+        if profiling:
+            with torch.profiler.record_function("mhead_attention"):
+                attend_features, attend_weights = self.mhead_attention(
+                    query = query_features,
+                    key = key_features,
+                    value = key_features,
+                    key_padding_mask = key_mask,
+                )
+        else:
+            attend_features, attend_weights = self.mhead_attention(
+                query=query_features,
+                key=key_features,
+                value=key_features,
+                key_padding_mask=key_mask,
+            )
 
         attend_features = self.drop_out(attend_features)
 
-        new_features = attend_features.squeeze(0)
-        act_features = self.linear2(self.dropout1(self.activation(self.linear1(new_features))))
-        new_features = new_features + self.dropout2(act_features)
-        new_features = self.norm(new_features)
-        new_features = self.output_layer(new_features)
-
+        if profiling:
+            with torch.profiler.record_function("feedforward"):
+                new_features = attend_features.squeeze(0)
+                act_features = self.linear2(self.dropout1(self.activation(self.linear1(new_features))))
+                new_features = new_features + self.dropout2(act_features)
+                new_features = self.norm(new_features)
+                new_features = self.output_layer(new_features)
+        else:
+            new_features = attend_features.squeeze(0)
+            act_features = self.linear2(self.dropout1(self.activation(self.linear1(new_features))))
+            new_features = new_features + self.dropout2(act_features)
+            new_features = self.norm(new_features)
+            new_features = self.output_layer(new_features)
         # update sp_tensor
         sp_tensor.features = new_features
         sp_tensor.indices = new_indices
@@ -223,7 +304,8 @@ class SparseAttention3d(Attention3d):
         sp_tensor.voxel_size = new_voxel_size
 
         del sp_tensor.map_table
-        sp_tensor.gather_dict = None
+        # sp_tensor.gather_dict = None
+        sp_tensor.gather_dict = gather_dict
         sp_tensor.map_table = new_map_table
         return sp_tensor
 
@@ -356,10 +438,18 @@ class AttentionResBlock(nn.Module):
             ))
 
     def forward(self, sp_tensor):
-        sp_tensor = self.sp_attention(sp_tensor)
+        if profiling:
+            with torch.profiler.record_function("sparse_attention"):
+                sp_tensor = self.sp_attention(sp_tensor)
+        else:
+            sp_tensor = self.sp_attention(sp_tensor)
         indentity_features = sp_tensor.features
         for subm_module in self.subm_attention_modules:
-            sp_tensor = subm_module(sp_tensor)
+            if profiling:
+                with torch.profiler.record_function("subm_attention"):
+                    sp_tensor = subm_module(sp_tensor)
+            else:
+                sp_tensor = subm_module(sp_tensor)
         sp_tensor.features += indentity_features
         return sp_tensor
 
@@ -391,20 +481,36 @@ class VoxelTransformer(nn.Module):
         batch_size = batch_dict['batch_size']
 
         voxel_features = self.input_transform(voxel_features)
-
-        sp_tensor = SparseTensor(
-            features = voxel_features,
-            indices = voxel_coords.int(),
-            spatial_shape = self.grid_size,
-            voxel_size = self.voxel_size,
-            point_cloud_range = self.point_cloud_range,
-            batch_size = batch_size,
-            hash_size = self.model_cfg.HASH_SIZE,
-            map_table = None,
-            gather_dict = None,
-        )
-        for attention_block in self.backbone:
-            sp_tensor = attention_block(sp_tensor)
+        if profiling:
+            with torch.profiler.record_function("build_hash(SparseTensor)"):
+                sp_tensor = SparseTensor(
+                    features = voxel_features,
+                    indices = voxel_coords.int(),
+                    spatial_shape = self.grid_size,
+                    voxel_size = self.voxel_size,
+                    point_cloud_range = self.point_cloud_range,
+                    batch_size = batch_size,
+                    hash_size = self.model_cfg.HASH_SIZE,
+                    map_table = None,
+                    gather_dict = None,
+                )
+            with torch.profiler.record_function("attention_block*3"):
+                for attention_block in self.backbone:
+                    sp_tensor = attention_block(sp_tensor)
+        else:
+            sp_tensor = SparseTensor(
+                features=voxel_features,
+                indices=voxel_coords.int(),
+                spatial_shape=self.grid_size,
+                voxel_size=self.voxel_size,
+                point_cloud_range=self.point_cloud_range,
+                batch_size=batch_size,
+                hash_size=self.model_cfg.HASH_SIZE,
+                map_table=None,
+                gather_dict=None,
+            )
+            for attention_block in self.backbone:
+                sp_tensor = attention_block(sp_tensor)
 
         batch_dict.update({
             'encoded_spconv_tensor': sp_tensor,
