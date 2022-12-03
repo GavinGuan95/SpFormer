@@ -11,8 +11,8 @@ MODEL:
 
     BACKBONE_3D:
         NAME: VoxelTransformer
-        USE_RELATIVE_COORDS: True
-        USE_POOLED_FEATURE: True
+        USE_RELATIVE_COORDS: False
+        USE_POOLED_FEATURE: False
         USE_NO_QUERY_COORDS: True
         NUM_OUTPUT_FEATURES: 64
         HASH_SIZE: 400000 # 5x max_voxels

@@ -13,6 +13,7 @@ from torch.nn.modules.linear import NonDynamicallyQuantizableLinear
 from torch.nn.init import constant_, xavier_normal_, xavier_uniform_
 from torch.nn.functional import linear, softmax, dropout
 import math # TODO: call to math.sqrt would make original pytorch implementation really slow
+from ...ops.votr_ops import votr_utils
 # end new imports
 
 buffer = torch.Tensor()
@@ -33,6 +34,7 @@ def _in_projection_packed(
     query_pre_calculated: bool = False,
     key_pre_calculated: bool = False,
     value_pre_calculated: bool = False,
+    key_value_group_into: Optional[dict] = None,
 ) -> List[Tensor]:
     r"""
     Performs the in-projection step of the attention operation, using packed weights.
@@ -74,7 +76,19 @@ def _in_projection_packed(
                 b_q = b_kv = None
             else:
                 b_q, b_kv = b.split([E, E * 2])
-            return (linear(q, w_q, b_q),) + linear(k, w_kv, b_kv).chunk(2, dim=-1)
+            if key_value_group_into is None:
+                return (linear(q, w_q, b_q),) + linear(k, w_kv, b_kv).chunk(2, dim=-1)
+            else:
+                key_and_value = linear(k, w_kv, b_kv)
+                grouped_key_and_value = votr_utils.grouping_operation(key_and_value.squeeze(0),
+                                                                      key_value_group_into['v_bs_cnt'],
+                                                                      key_value_group_into['key_indices'],
+                                                                      key_value_group_into['k_bs_cnt'])
+                key_features, value_features = grouped_key_and_value.chunk(2, dim=1)
+                key_features = key_features.permute(2, 0, 1).contiguous()
+                value_features = value_features.permute(2, 0, 1).contiguous()
+                return linear(q, w_q, b_q), key_features, value_features
+
     else:
         w_q, w_k, w_v = w.chunk(3)
         if b is None:
@@ -475,6 +489,7 @@ def multi_head_attention_forward2(
     query_pre_calculated: bool = False,
     key_pre_calculated: bool = False,
     value_pre_calculated: bool = False,
+    key_value_group_into: bool = False,
 ) -> Tuple[Tensor, Optional[Tensor]]:
     r"""
     Args:
@@ -585,7 +600,8 @@ def multi_head_attention_forward2(
     #
     if not use_separate_proj_weight:
         q, k, v = _in_projection_packed(query, key, value, in_proj_weight, in_proj_bias,
-                                        query_pre_calculated, key_pre_calculated, value_pre_calculated)
+                                        query_pre_calculated, key_pre_calculated, value_pre_calculated,
+                                        key_value_group_into)
     else:
         assert q_proj_weight is not None, "use_separate_proj_weight is True but q_proj_weight is None"
         assert k_proj_weight is not None, "use_separate_proj_weight is True but k_proj_weight is None"

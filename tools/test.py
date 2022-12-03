@@ -230,4 +230,8 @@ def main():
 
 
 if __name__ == '__main__':
+    import timeit
+    start_time = timeit.default_timer()
     main()
+    end_time = timeit.default_timer()
+    print('Time: {:.2f}s'.format(end_time - start_time))
