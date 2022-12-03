@@ -150,6 +150,10 @@ class SparseAttention3d(Attention3d):
     #     return _gather_dict
 
     @torch.no_grad()
+    def set_accu_stride(self, strides):
+        self.accu_strides = strides
+
+    @torch.no_grad()
     def create_gather_dict(self, attention_modes, map_table, voxel_indices, spatial_shape):
         _gather_dict = {}
         for attention_mode in attention_modes:
@@ -192,7 +196,7 @@ class SparseAttention3d(Attention3d):
         y_shape = sp_tensor.spatial_shape[1] // self.strides[1]
         z_shape = sp_tensor.spatial_shape[2] // self.strides[2]
         new_spatial_shape = [x_shape, y_shape, z_shape]
-        self.accu_strides = [accu_s*s for accu_s, s in zip(self.accu_strides, self.strides)]
+        # self.accu_strides = [accu_s*s for accu_s, s in zip(self.accu_strides, self.strides)]
         # new_indices, new_map_table = votr_utils.hash_table_down_sample(self.strides, self.num_ds_voxels, sp_tensor.batch_size, sp_tensor.hash_size, new_spatial_shape, sp_tensor.indices)
         new_indices, new_map_table, old_feature_idx = votr_utils.hash_table_down_sample_with_feature_reuse_densemap_stridetag(self.strides, self.accu_strides, self.num_ds_voxels, sp_tensor.batch_size, sp_tensor.hash_size, new_spatial_shape, sp_tensor.indices, sp_tensor.map_table)
         # import pdb; pdb.set_trace()
@@ -509,7 +513,10 @@ class VoxelTransformer(nn.Module):
                 map_table=None,
                 gather_dict=None,
             )
+            strides = 1
             for attention_block in self.backbone:
+                strides *= 2
+                attention_block.sp_attention.set_accu_stride([strides] * 3)
                 sp_tensor = attention_block(sp_tensor)
 
         batch_dict.update({
