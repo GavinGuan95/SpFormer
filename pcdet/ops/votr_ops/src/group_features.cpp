@@ -68,3 +68,23 @@ int group_features_wrapper_stack(int B, int M, int C, int nsample,
     group_features_kernel_launcher_stack(B, M, C, nsample, features, features_batch_cnt, idx, idx_batch_cnt, out);
     return 1;
 }
+
+int group_features_optimized_wrapper_stack(int B, int M, int C, int nsample,
+    at::Tensor features_tensor, at::Tensor features_batch_cnt_tensor,
+    at::Tensor idx_tensor, at::Tensor idx_batch_cnt_tensor, at::Tensor out_tensor) {
+
+    CHECK_INPUT(features_tensor);
+    CHECK_INPUT(features_batch_cnt_tensor);
+    CHECK_INPUT(idx_tensor);
+    CHECK_INPUT(idx_batch_cnt_tensor);
+    CHECK_INPUT(out_tensor);
+
+    const float *features = features_tensor.data<float>();
+    const int *idx = idx_tensor.data<int>();
+    const int *features_batch_cnt = features_batch_cnt_tensor.data<int>();
+    const int *idx_batch_cnt = idx_batch_cnt_tensor.data<int>();
+    float *out = out_tensor.data<float>();
+
+    group_features_kernel_launcher_optimized_stack(B, M, C, nsample, features, features_batch_cnt, idx, idx_batch_cnt, out);
+    return 1;
+}

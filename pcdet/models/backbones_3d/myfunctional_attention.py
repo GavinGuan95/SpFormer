@@ -88,11 +88,23 @@ def _in_projection_packed(
                 return (linear(q, w_q, b_q), linear(k, w_k, b_k), linear(v, w_v, b_v))
             else:
                 key_and_value = linear(k, w_kv, b_kv)
-                grouped_key_and_value = votr_utils.grouping_operation(key_and_value.squeeze(0),
-                                                                      key_value_group_into['v_bs_cnt'],
-                                                                      key_value_group_into['key_indices'],
-                                                                      key_value_group_into['k_bs_cnt'])
-                key_features, value_features = grouped_key_and_value.chunk(2, dim=1)
+                with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU,
+                                                        torch.profiler.ProfilerActivity.CUDA]) as prof:
+
+                    grouped_key_and_value2 = votr_utils.grouping_operation_optimized(key_and_value.squeeze(0),
+                                                                          key_value_group_into['v_bs_cnt'],
+                                                                          key_value_group_into['key_indices'],
+                                                                          key_value_group_into['k_bs_cnt'])
+                    key_features, value_features = grouped_key_and_value2.chunk(2, dim=2)
+
+                    grouped_key_and_value = votr_utils.grouping_operation(key_and_value.squeeze(0),
+                                                                          key_value_group_into['v_bs_cnt'],
+                                                                          key_value_group_into['key_indices'],
+                                                                          key_value_group_into['k_bs_cnt'])
+                    key_features, value_features = grouped_key_and_value.chunk(2, dim=1)
+
+                print(prof.key_averages().table(sort_by="self_cpu_time_total", row_limit=10))
+                print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
                 # key_features = key_features.permute(2, 0, 1)
                 # value_features = value_features.permute(2, 0, 1)
                 # grouped_key_and_value = grouped_key_and_value.permute(2, 0, 1)
@@ -671,7 +683,8 @@ def multi_head_attention_forward2(
         if key_value_group_into is None:
             k = k.contiguous().view(k.shape[0], bsz * num_heads, head_dim).transpose(0, 1)
         else:
-            k = einops.rearrange(k, 't (num_heads head_dim) d -> (t num_heads) d head_dim', num_heads=num_heads, head_dim=head_dim)
+            # k = einops.rearrange(k, 't (num_heads head_dim) d -> (t num_heads) d head_dim', num_heads=num_heads, head_dim=head_dim)
+            k = einops.rearrange(k, 't d (num_heads head_dim) -> (t num_heads) d head_dim', num_heads=num_heads, head_dim=head_dim)
             # k2 = k.permute(2, 0, 1)
             # k2 = k2.contiguous().view(k2.shape[0], bsz * num_heads, head_dim).transpose(0, 1)
             # dummy = 1
@@ -686,7 +699,8 @@ def multi_head_attention_forward2(
         if key_value_group_into is None:
             v = v.contiguous().view(v.shape[0], bsz * num_heads, head_dim).transpose(0, 1)
         else:
-            v = einops.rearrange(v, 't (num_heads head_dim) d -> (t num_heads) d head_dim', num_heads=num_heads, head_dim=head_dim)
+            # v = einops.rearrange(v, 't (num_heads head_dim) d -> (t num_heads) d head_dim', num_heads=num_heads, head_dim=head_dim)
+            v = einops.rearrange(v, 't d (num_heads head_dim) -> (t num_heads) d head_dim', num_heads=num_heads, head_dim=head_dim)
     else:
         # TODO finish disentangling control flow so we don't do in-projections when statics are passed
         assert static_v.size(0) == bsz * num_heads, \

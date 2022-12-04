@@ -58,10 +58,10 @@ def eval_one_epoch(cfg, model, dataloader, epoch_id, logger, dist_test=False, sa
             batch_dict.update({'temperature': cfg.OPTIMIZATION.DECAY_TEMPERATURE[-1]})
 
         load_data_to_gpu(batch_dict)
-        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU,
-                                                torch.profiler.ProfilerActivity.CUDA]) as prof:
-            with torch.no_grad():
-                pred_dicts, ret_dict = model(batch_dict)
+        # with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU,
+        #                                         torch.profiler.ProfilerActivity.CUDA]) as prof:
+        with torch.no_grad():
+            pred_dicts, ret_dict = model(batch_dict)
         disp_dict = {}
 
         statistics_info(cfg, ret_dict, metric, disp_dict)

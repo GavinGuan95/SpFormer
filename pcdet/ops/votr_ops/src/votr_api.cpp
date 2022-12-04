@@ -19,5 +19,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("sparse_strided_attention_with_tensor_wrapper", &sparse_strided_attention_with_tensor_wrapper, "sparse_strided_attention_with_tensor_wrapper");
     m.def("sparse_strided_attention_with_hash_wrapper", &sparse_strided_attention_with_hash_wrapper, "sparse_strided_attention_with_hash_wrapper");
     m.def("group_features_grad_wrapper", &group_features_grad_wrapper_stack, "group_features_grad_wrapper_stack");
+//    m.def("group_features_grad_optimized_wrapper", &group_features_grad_optimized_wrapper_stack, "group_features_grad_optimized_wrapper_stack");
     m.def("group_features_wrapper", &group_features_wrapper_stack, "group_features_wrapper_stack");
+    m.def("group_features_optimized_wrapper", &group_features_optimized_wrapper_stack, "group_features_optimized_wrapper_stack");
 }
