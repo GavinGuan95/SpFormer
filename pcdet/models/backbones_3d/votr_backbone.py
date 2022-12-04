@@ -107,12 +107,14 @@ class Attention3d(nn.Module):
 
 class SparseAttention3d(Attention3d):
     def __init__(self, input_channels, output_channels, ff_channels, dropout, num_heads, attention_modes, strides, num_ds_voxels,
-                 use_relative_coords = False, use_pooled_feature = False, use_no_query_coords = False):
+                 use_relative_coords = False, use_pooled_feature = False, use_no_query_coords = False,
+                 reduced_attention_key_calc_in_strided = False):
         super(SparseAttention3d, self).__init__(input_channels, output_channels, ff_channels, dropout, num_heads, attention_modes)
 
         self.use_relative_coords = use_relative_coords
         self.use_pooled_features = use_pooled_feature
         self.use_no_query_coords = use_no_query_coords
+        self.reduced_attention_key_calc_in_strided = reduced_attention_key_calc_in_strided
 
         self.strides = strides
         self.num_ds_voxels = num_ds_voxels
@@ -157,74 +159,11 @@ class SparseAttention3d(Attention3d):
         new_indices, new_map_table = votr_utils.hash_table_down_sample(self.strides, self.num_ds_voxels, sp_tensor.batch_size, sp_tensor.hash_size, new_spatial_shape, sp_tensor.indices)
         return new_spatial_shape, new_indices, new_map_table
 
-    def forward_(self, sp_tensor):
-        sp_tensor_copy = copy.deepcopy(sp_tensor)
-        sp_tensor_copy.features = sp_tensor_copy.features[0:1]
-        sp_tensor_copy.indices = sp_tensor_copy.indices[0:1]
-        aa, bb, cc = self.downsample(sp_tensor_copy)
-        with torch.profiler.record_function("self.downsample"):
-            new_spatial_shape, new_indices, new_map_table = self.downsample(sp_tensor)
-        vx, vy, vz = sp_tensor.voxel_size
-        new_voxel_size = [vx * self.strides[0], vy * self.strides[1], vz * self.strides[2]]
-        # gather_dict = self.create_gather_dict(self.attention_modes, sp_tensor.map_table, new_indices, sp_tensor.spatial_shape)
-        gather_dict = self.create_gather_dict(self.attention_modes, sp_tensor.map_table, new_indices, sp_tensor.spatial_shape)
-
-        voxel_features = sp_tensor.features
-        v_bs_cnt = self.with_bs_cnt(sp_tensor.indices, sp_tensor.batch_size)
-        k_bs_cnt = self.with_bs_cnt(new_indices, sp_tensor.batch_size)
-
-        a_key_indices, a_key_mask = [], []
-        for attention_idx, attetion_mode in enumerate(self.attention_modes):
-            key_indices, key_mask = gather_dict[attetion_mode.NAME]
-            a_key_indices.append(key_indices)
-            a_key_mask.append(key_mask)
-
-        key_indices = torch.cat(a_key_indices, dim = 1)
-        key_mask = torch.cat(a_key_mask, dim = 1)
-
-        voxel_coords = self.with_coords(sp_tensor.indices, sp_tensor.point_cloud_range, sp_tensor.voxel_size)
-
-        query_coords = self.with_coords(new_indices, sp_tensor.point_cloud_range, new_voxel_size)
-        query_pre_features = self.q_pos_proj(query_coords).unsqueeze(0)
-        voxel_features = voxel_features.unsqueeze(0)
-
-        attend_features, attend_weights = self.mhead_attention(
-            query = query_pre_features,
-            key = voxel_features,
-            value = voxel_features,
-            key_padding_mask = key_mask,
-            key_value_group_into ={'v_bs_cnt': v_bs_cnt, 'key_indices': key_indices, 'k_bs_cnt': k_bs_cnt},
-        )
-
-        attend_features = self.drop_out(attend_features)
-
-        new_features = attend_features.squeeze(0)
-        act_features = self.linear2(self.dropout1(self.activation(self.linear1(new_features))))
-        new_features = new_features + self.dropout2(act_features)
-        new_features = self.norm(new_features)
-        new_features = self.output_layer(new_features)
-
-        # update sp_tensor
-        sp_tensor.features = new_features
-        sp_tensor.indices = new_indices
-        sp_tensor.spatial_shape = new_spatial_shape
-        sp_tensor.voxel_size = new_voxel_size
-
-        del sp_tensor.map_table
-        sp_tensor.gather_dict = None
-        sp_tensor.map_table = new_map_table
-        return sp_tensor
-
     def forward(self, sp_tensor):
-        sp_tensor_copy = copy.deepcopy(sp_tensor)
-        sp_tensor_copy.features = sp_tensor_copy.features[0:1]
-        sp_tensor_copy.indices = sp_tensor_copy.indices[0:1]
-        aa, bb, cc = self.downsample(sp_tensor_copy)
         with torch.profiler.record_function("self.downsample"):
             new_spatial_shape, new_indices, new_map_table = self.downsample(sp_tensor)
         vx, vy, vz = sp_tensor.voxel_size
         new_voxel_size = [vx * self.strides[0], vy * self.strides[1], vz * self.strides[2]]
-        # gather_dict = self.create_gather_dict(self.attention_modes, sp_tensor.map_table, new_indices, sp_tensor.spatial_shape)
         gather_dict = self.create_gather_dict(self.attention_modes, sp_tensor.map_table, new_indices, sp_tensor.spatial_shape)
 
         voxel_features = sp_tensor.features
@@ -239,91 +178,30 @@ class SparseAttention3d(Attention3d):
 
         key_indices = torch.cat(a_key_indices, dim = 1)
         key_mask = torch.cat(a_key_mask, dim = 1)
-
-        voxel_features_at_keys = votr_utils.grouping_operation(voxel_features, v_bs_cnt, key_indices, k_bs_cnt)
-        voxel_coords = self.with_coords(sp_tensor.indices, sp_tensor.point_cloud_range, sp_tensor.voxel_size)
 
         query_coords = self.with_coords(new_indices, sp_tensor.point_cloud_range, new_voxel_size)
         query_pre_features = self.q_pos_proj(query_coords).unsqueeze(0)
-        voxel_features_at_keys = voxel_features_at_keys.permute(2, 0, 1).contiguous()
 
-        attend_features, attend_weights = self.mhead_attention(
-            query = query_pre_features,
-            key = voxel_features_at_keys,
-            value = voxel_features_at_keys,
-            key_padding_mask = key_mask,
-        )
+        if self.reduced_attention_key_calc_in_strided:
+            voxel_features = voxel_features.unsqueeze(0)
+            attend_features, attend_weights = self.mhead_attention(
+                query = query_pre_features,
+                key = voxel_features,
+                value = voxel_features,
+                key_padding_mask = key_mask,
+                key_value_group_into ={'v_bs_cnt': v_bs_cnt, 'key_indices': key_indices, 'k_bs_cnt': k_bs_cnt},
+            )
 
-        attend_features = self.drop_out(attend_features)
-
-        new_features = attend_features.squeeze(0)
-        act_features = self.linear2(self.dropout1(self.activation(self.linear1(new_features))))
-        new_features = new_features + self.dropout2(act_features)
-        new_features = self.norm(new_features)
-        new_features = self.output_layer(new_features)
-
-        # update sp_tensor
-        sp_tensor.features = new_features
-        sp_tensor.indices = new_indices
-        sp_tensor.spatial_shape = new_spatial_shape
-        sp_tensor.voxel_size = new_voxel_size
-
-        del sp_tensor.map_table
-        sp_tensor.gather_dict = None
-        sp_tensor.map_table = new_map_table
-        return sp_tensor
-
-    def forward_old(self, sp_tensor):
-        with torch.profiler.record_function("self.downsample"):
-            new_spatial_shape, new_indices, new_map_table = self.downsample(sp_tensor)
-        vx, vy, vz = sp_tensor.voxel_size
-        new_voxel_size = [vx * self.strides[0], vy * self.strides[1], vz * self.strides[2]]
-        # gather_dict = self.create_gather_dict(self.attention_modes, sp_tensor.map_table, new_indices, sp_tensor.spatial_shape)
-        gather_dict = self.create_gather_dict(self.attention_modes, sp_tensor.map_table, new_indices, sp_tensor.spatial_shape)
-
-        voxel_features = sp_tensor.features
-        v_bs_cnt = self.with_bs_cnt(sp_tensor.indices, sp_tensor.batch_size)
-        k_bs_cnt = self.with_bs_cnt(new_indices, sp_tensor.batch_size)
-
-        a_key_indices, a_key_mask = [], []
-        for attention_idx, attetion_mode in enumerate(self.attention_modes):
-            key_indices, key_mask = gather_dict[attetion_mode.NAME]
-            a_key_indices.append(key_indices)
-            a_key_mask.append(key_mask)
-
-        key_indices = torch.cat(a_key_indices, dim = 1)
-        key_mask = torch.cat(a_key_mask, dim = 1)
-
-        key_features = votr_utils.grouping_operation(voxel_features, v_bs_cnt, key_indices, k_bs_cnt)
-        voxel_coords = self.with_coords(sp_tensor.indices, sp_tensor.point_cloud_range, sp_tensor.voxel_size)
-        key_coords = votr_utils.grouping_operation(voxel_coords, v_bs_cnt, key_indices, k_bs_cnt)
-
-        query_coords = self.with_coords(new_indices, sp_tensor.point_cloud_range, new_voxel_size)
-
-        if self.use_pooled_features:
-            pooled_query_features = key_features.max(dim=-1)[0]
-            pooled_query_features = pooled_query_features.unsqueeze(0)
-            if self.use_no_query_coords:
-                query_features = pooled_query_features
-            else:
-                query_features = self.q_pos_proj(query_coords).unsqueeze(0)
-                query_features = query_features + pooled_query_features
         else:
-            query_features = self.q_pos_proj(query_coords).unsqueeze(0)
+            voxel_features_at_keys = votr_utils.grouping_operation(voxel_features, v_bs_cnt, key_indices, k_bs_cnt)
+            voxel_features_at_keys = voxel_features_at_keys.permute(2, 0, 1).contiguous()
 
-        if self.use_relative_coords:
-            key_coords = key_coords - query_coords.unsqueeze(-1) # (N, 3, size)
-
-        key_pos_emb = self.k_pos_proj(key_coords)
-        key_features = key_features + key_pos_emb
-        key_features = key_features.permute(2, 0, 1).contiguous() # (size, N1+N2, C)
-
-        attend_features, attend_weights = self.mhead_attention(
-            query = query_features,
-            key = key_features,
-            value = key_features,
-            key_padding_mask = key_mask,
-        )
+            attend_features, attend_weights = self.mhead_attention(
+                query = query_pre_features,
+                key = voxel_features_at_keys,
+                value = voxel_features_at_keys,
+                key_padding_mask = key_mask,
+            )
 
         attend_features = self.drop_out(attend_features)
 
@@ -343,15 +221,146 @@ class SparseAttention3d(Attention3d):
         sp_tensor.gather_dict = None
         sp_tensor.map_table = new_map_table
         return sp_tensor
+
+    # def forward_new_lowspeed(self, sp_tensor):
+    #     sp_tensor_copy = copy.deepcopy(sp_tensor)
+    #     sp_tensor_copy.features = sp_tensor_copy.features[0:1]
+    #     sp_tensor_copy.indices = sp_tensor_copy.indices[0:1]
+    #     aa, bb, cc = self.downsample(sp_tensor_copy)
+    #     with torch.profiler.record_function("self.downsample"):
+    #         new_spatial_shape, new_indices, new_map_table = self.downsample(sp_tensor)
+    #     vx, vy, vz = sp_tensor.voxel_size
+    #     new_voxel_size = [vx * self.strides[0], vy * self.strides[1], vz * self.strides[2]]
+    #     # gather_dict = self.create_gather_dict(self.attention_modes, sp_tensor.map_table, new_indices, sp_tensor.spatial_shape)
+    #     gather_dict = self.create_gather_dict(self.attention_modes, sp_tensor.map_table, new_indices, sp_tensor.spatial_shape)
+    #
+    #     voxel_features = sp_tensor.features
+    #     v_bs_cnt = self.with_bs_cnt(sp_tensor.indices, sp_tensor.batch_size)
+    #     k_bs_cnt = self.with_bs_cnt(new_indices, sp_tensor.batch_size)
+    #
+    #     a_key_indices, a_key_mask = [], []
+    #     for attention_idx, attetion_mode in enumerate(self.attention_modes):
+    #         key_indices, key_mask = gather_dict[attetion_mode.NAME]
+    #         a_key_indices.append(key_indices)
+    #         a_key_mask.append(key_mask)
+    #
+    #     key_indices = torch.cat(a_key_indices, dim = 1)
+    #     key_mask = torch.cat(a_key_mask, dim = 1)
+    #
+    #     voxel_features_at_keys = votr_utils.grouping_operation(voxel_features, v_bs_cnt, key_indices, k_bs_cnt)
+    #     voxel_coords = self.with_coords(sp_tensor.indices, sp_tensor.point_cloud_range, sp_tensor.voxel_size)
+    #
+    #     query_coords = self.with_coords(new_indices, sp_tensor.point_cloud_range, new_voxel_size)
+    #     query_pre_features = self.q_pos_proj(query_coords).unsqueeze(0)
+    #     voxel_features_at_keys = voxel_features_at_keys.permute(2, 0, 1).contiguous()
+    #
+    #     attend_features, attend_weights = self.mhead_attention(
+    #         query = query_pre_features,
+    #         key = voxel_features_at_keys,
+    #         value = voxel_features_at_keys,
+    #         key_padding_mask = key_mask,
+    #     )
+    #
+    #     attend_features = self.drop_out(attend_features)
+    #
+    #     new_features = attend_features.squeeze(0)
+    #     act_features = self.linear2(self.dropout1(self.activation(self.linear1(new_features))))
+    #     new_features = new_features + self.dropout2(act_features)
+    #     new_features = self.norm(new_features)
+    #     new_features = self.output_layer(new_features)
+    #
+    #     # update sp_tensor
+    #     sp_tensor.features = new_features
+    #     sp_tensor.indices = new_indices
+    #     sp_tensor.spatial_shape = new_spatial_shape
+    #     sp_tensor.voxel_size = new_voxel_size
+    #
+    #     del sp_tensor.map_table
+    #     sp_tensor.gather_dict = None
+    #     sp_tensor.map_table = new_map_table
+    #     return sp_tensor
+    #
+    # def forward(self, sp_tensor):
+    #     with torch.profiler.record_function("self.downsample"):
+    #         new_spatial_shape, new_indices, new_map_table = self.downsample(sp_tensor)
+    #     vx, vy, vz = sp_tensor.voxel_size
+    #     new_voxel_size = [vx * self.strides[0], vy * self.strides[1], vz * self.strides[2]]
+    #     # gather_dict = self.create_gather_dict(self.attention_modes, sp_tensor.map_table, new_indices, sp_tensor.spatial_shape)
+    #     gather_dict = self.create_gather_dict(self.attention_modes, sp_tensor.map_table, new_indices, sp_tensor.spatial_shape)
+    #
+    #     voxel_features = sp_tensor.features
+    #     v_bs_cnt = self.with_bs_cnt(sp_tensor.indices, sp_tensor.batch_size)
+    #     k_bs_cnt = self.with_bs_cnt(new_indices, sp_tensor.batch_size)
+    #
+    #     a_key_indices, a_key_mask = [], []
+    #     for attention_idx, attetion_mode in enumerate(self.attention_modes):
+    #         key_indices, key_mask = gather_dict[attetion_mode.NAME]
+    #         a_key_indices.append(key_indices)
+    #         a_key_mask.append(key_mask)
+    #
+    #     key_indices = torch.cat(a_key_indices, dim = 1)
+    #     key_mask = torch.cat(a_key_mask, dim = 1)
+    #
+    #     key_features = votr_utils.grouping_operation(voxel_features, v_bs_cnt, key_indices, k_bs_cnt)
+    #     voxel_coords = self.with_coords(sp_tensor.indices, sp_tensor.point_cloud_range, sp_tensor.voxel_size)
+    #     key_coords = votr_utils.grouping_operation(voxel_coords, v_bs_cnt, key_indices, k_bs_cnt)
+    #
+    #     query_coords = self.with_coords(new_indices, sp_tensor.point_cloud_range, new_voxel_size)
+    #
+    #     if self.use_pooled_features:
+    #         pooled_query_features = key_features.max(dim=-1)[0]
+    #         pooled_query_features = pooled_query_features.unsqueeze(0)
+    #         if self.use_no_query_coords:
+    #             query_features = pooled_query_features
+    #         else:
+    #             query_features = self.q_pos_proj(query_coords).unsqueeze(0)
+    #             query_features = query_features + pooled_query_features
+    #     else:
+    #         query_features = self.q_pos_proj(query_coords).unsqueeze(0)
+    #
+    #     if self.use_relative_coords:
+    #         key_coords = key_coords - query_coords.unsqueeze(-1) # (N, 3, size)
+    #
+    #     key_pos_emb = self.k_pos_proj(key_coords)
+    #     key_features = key_features + key_pos_emb
+    #     key_features = key_features.permute(2, 0, 1).contiguous() # (size, N1+N2, C)
+    #
+    #     attend_features, attend_weights = self.mhead_attention(
+    #         query = query_features,
+    #         key = key_features,
+    #         value = key_features,
+    #         key_padding_mask = key_mask,
+    #     )
+    #
+    #     attend_features = self.drop_out(attend_features)
+    #
+    #     new_features = attend_features.squeeze(0)
+    #     act_features = self.linear2(self.dropout1(self.activation(self.linear1(new_features))))
+    #     new_features = new_features + self.dropout2(act_features)
+    #     new_features = self.norm(new_features)
+    #     new_features = self.output_layer(new_features)
+    #
+    #     # update sp_tensor
+    #     sp_tensor.features = new_features
+    #     sp_tensor.indices = new_indices
+    #     sp_tensor.spatial_shape = new_spatial_shape
+    #     sp_tensor.voxel_size = new_voxel_size
+    #
+    #     del sp_tensor.map_table
+    #     sp_tensor.gather_dict = None
+    #     sp_tensor.map_table = new_map_table
+    #     return sp_tensor
 
 class SubMAttention3d(Attention3d):
     def __init__(self, input_channels, output_channels, ff_channels, dropout, num_heads, attention_modes,
-                 use_pos_emb = True, use_relative_coords = False, use_no_query_coords = False):
+                 use_pos_emb = True, use_relative_coords = False, use_no_query_coords = False,
+                 avoid_repeated_coord_calc_in_subm = False):
         super(SubMAttention3d, self).__init__(input_channels, output_channels, ff_channels, dropout, num_heads, attention_modes)
 
         self.use_relative_coords = use_relative_coords
         self.use_no_query_coords = use_no_query_coords
         self.use_pos_emb = use_pos_emb
+        self.avoid_repeated_coord_calc_in_subm = avoid_repeated_coord_calc_in_subm
 
         self.norm1 = nn.BatchNorm1d(input_channels)
         self.norm2 = nn.BatchNorm1d(input_channels)
@@ -387,7 +396,67 @@ class SubMAttention3d(Attention3d):
 
         return _gather_dict
 
-    def forward(self, sp_tensor):
+    def forward(self, sp_tensor, voxel_coords=None, key_coords=None, key_indices=None, key_mask=None):
+        if not sp_tensor.gather_dict:
+            sp_tensor.gather_dict = self.create_gather_dict(self.attention_modes, sp_tensor.map_table, sp_tensor.indices, sp_tensor.spatial_shape)
+
+        voxel_features = sp_tensor.features
+        v_bs_cnt = self.with_bs_cnt(sp_tensor.indices, sp_tensor.batch_size)
+        k_bs_cnt = v_bs_cnt.clone()
+
+        if key_indices is None or not self.avoid_repeated_coord_calc_in_subm:
+            a_key_indices, a_key_mask = [], []
+            for attention_idx, attetion_mode in enumerate(self.attention_modes):
+                key_indices, key_mask = sp_tensor.gather_dict[attetion_mode.NAME]
+                a_key_indices.append(key_indices)
+                a_key_mask.append(key_mask)
+
+            key_indices = torch.cat(a_key_indices, dim = 1)
+            key_mask = torch.cat(a_key_mask, dim = 1)
+
+        query_features = voxel_features.unsqueeze(0) # (1, N1+N2, C)
+        key_features = votr_utils.grouping_operation(voxel_features, v_bs_cnt, key_indices, k_bs_cnt)
+
+        if self.use_pos_emb:
+            if voxel_coords is None or not self.avoid_repeated_coord_calc_in_subm:
+                voxel_coords = self.with_coords(sp_tensor.indices, sp_tensor.point_cloud_range, sp_tensor.voxel_size)
+            if key_coords is None or not self.avoid_repeated_coord_calc_in_subm:
+                key_coords = votr_utils.grouping_operation(voxel_coords, v_bs_cnt, key_indices, k_bs_cnt)
+            if self.use_relative_coords:
+                key_coords = key_coords - voxel_coords.unsqueeze(-1)
+            key_pos_emb = self.k_pos_proj(key_coords)
+            key_features = key_features + key_pos_emb
+
+            if self.use_no_query_coords:
+                pass
+            else:
+                query_pos_emb = self.q_pos_proj(voxel_coords).unsqueeze(0)
+                query_features = query_features + query_pos_emb
+
+        key_features = key_features.permute(2, 0, 1).contiguous() # (size, N1+N2, C)
+
+        attend_features, attend_weights = self.mhead_attention(
+            query = query_features,
+            key = key_features,
+            value = key_features,
+            key_padding_mask = key_mask,
+        )
+
+        attend_features = self.drop_out(attend_features)
+        voxel_features = voxel_features + attend_features.squeeze(0)
+        voxel_features = self.norm1(voxel_features)
+        act_features = self.linear2(self.dropout1(self.activation(self.linear1(voxel_features))))
+        voxel_features = voxel_features + self.dropout2(act_features)
+        voxel_features = self.norm2(voxel_features)
+        voxel_features = self.output_layer(voxel_features)
+        sp_tensor.features = voxel_features
+
+        if self.avoid_repeated_coord_calc_in_subm:
+            return sp_tensor, voxel_coords, key_coords, key_indices, key_mask
+        else:
+            return sp_tensor
+
+    def forward_old(self, sp_tensor):
         if not sp_tensor.gather_dict:
             sp_tensor.gather_dict = self.create_gather_dict(self.attention_modes, sp_tensor.map_table, sp_tensor.indices, sp_tensor.spatial_shape)
 
@@ -441,7 +510,8 @@ class SubMAttention3d(Attention3d):
         return sp_tensor
 
 class AttentionResBlock(nn.Module):
-    def __init__(self, model_cfg, use_relative_coords = False, use_pooled_feature = False, use_no_query_coords = False):
+    def __init__(self, model_cfg, use_relative_coords=False, use_pooled_feature=False, use_no_query_coords=False,
+                 reduced_attention_key_calc_in_strided=False, avoid_repeated_coord_calc_in_subm=False):
         super(AttentionResBlock, self).__init__()
         sp_cfg = model_cfg.SP_CFGS
         self.sp_attention = SparseAttention3d(
@@ -456,6 +526,7 @@ class AttentionResBlock(nn.Module):
             use_relative_coords = use_relative_coords,
             use_pooled_feature = use_pooled_feature,
             use_no_query_coords= use_no_query_coords,
+            reduced_attention_key_calc_in_strided= reduced_attention_key_calc_in_strided,
         )
         subm_cfg = model_cfg.SUBM_CFGS
         self.subm_attention_modules = nn.ModuleList()
@@ -470,13 +541,22 @@ class AttentionResBlock(nn.Module):
                 use_pos_emb =  subm_cfg.USE_POS_EMB,
                 use_relative_coords = use_relative_coords,
                 use_no_query_coords= use_no_query_coords,
+                avoid_repeated_coord_calc_in_subm= avoid_repeated_coord_calc_in_subm,
             ))
+        self.avoid_repeated_coord_calc_in_subm = avoid_repeated_coord_calc_in_subm
 
     def forward(self, sp_tensor):
         sp_tensor = self.sp_attention(sp_tensor)
         indentity_features = sp_tensor.features
+        voxel_coords = None
+        key_coords = None
+        key_indices = None
+        key_mask = None
         for subm_module in self.subm_attention_modules:
-            sp_tensor = subm_module(sp_tensor)
+            if self.avoid_repeated_coord_calc_in_subm:
+                sp_tensor, voxel_coords, key_coords, key_indices, key_mask = subm_module(sp_tensor, voxel_coords, key_coords, key_indices, key_mask)
+            else:
+                sp_tensor = subm_module(sp_tensor)
         sp_tensor.features += indentity_features
         return sp_tensor
 
@@ -499,7 +579,12 @@ class VoxelTransformer(nn.Module):
         )
         self.backbone = nn.ModuleList()
         for param in self.model_cfg.PARAMS:
-            self.backbone.append(AttentionResBlock(param, self.use_relative_coords, self.use_pooled_feature, self.use_no_query_coords))
+            self.backbone.append(AttentionResBlock(param,
+                                                   self.use_relative_coords,
+                                                   self.use_pooled_feature,
+                                                   self.use_no_query_coords,
+                                                   self.model_cfg.REDUCED_ATTENTION_KEY_CALC_IN_STRIDED,
+                                                   self.model_cfg.AVOID_REPEATED_COORD_CALC_IN_SUBM))
 
         self.num_point_features = self.model_cfg.NUM_OUTPUT_FEATURES
 

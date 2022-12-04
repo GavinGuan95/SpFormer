@@ -14,6 +14,7 @@ from torch.nn.init import constant_, xavier_normal_, xavier_uniform_
 from torch.nn.functional import linear, softmax, dropout
 import math # TODO: call to math.sqrt would make original pytorch implementation really slow
 from ...ops.votr_ops import votr_utils
+import einops
 # end new imports
 
 buffer = torch.Tensor()
@@ -71,13 +72,20 @@ def _in_projection_packed(
             return linear(q, w, b).chunk(3, dim=-1)
         else:
             # encoder-decoder attention
-            w_q, w_kv = w.split([E, E * 2])
-            if b is None:
-                b_q = b_kv = None
-            else:
-                b_q, b_kv = b.split([E, E * 2])
             if key_value_group_into is None:
-                return (linear(q, w_q, b_q),) + linear(k, w_kv, b_kv).chunk(2, dim=-1)
+                w_q, w_k, w_v = w.split([E, E, E])
+            else:
+                w_q, w_kv = w.split([E, E * 2])
+            if b is None:
+                b_q = b_kv = b_k = b_v = None
+            else:
+                if key_value_group_into is None:
+                    b_q, b_k, b_v = b.split([E, E, E])
+                else:
+                    b_q, b_kv = b.split([E, E * 2])
+            if key_value_group_into is None:
+                # return (linear(q, w_q, b_q),) + linear(k, w_kv, b_kv).chunk(2, dim=-1)
+                return (linear(q, w_q, b_q), linear(k, w_k, b_k), linear(v, w_v, b_v))
             else:
                 key_and_value = linear(k, w_kv, b_kv)
                 grouped_key_and_value = votr_utils.grouping_operation(key_and_value.squeeze(0),
@@ -85,8 +93,10 @@ def _in_projection_packed(
                                                                       key_value_group_into['key_indices'],
                                                                       key_value_group_into['k_bs_cnt'])
                 key_features, value_features = grouped_key_and_value.chunk(2, dim=1)
-                key_features = key_features.permute(2, 0, 1).contiguous()
-                value_features = value_features.permute(2, 0, 1).contiguous()
+                # key_features = key_features.permute(2, 0, 1)
+                # value_features = value_features.permute(2, 0, 1)
+                # grouped_key_and_value = grouped_key_and_value.permute(2, 0, 1)
+                # key_features, value_features = grouped_key_and_value.chunk(2, dim=-1)
                 return linear(q, w_q, b_q), key_features, value_features
 
     else:
@@ -658,7 +668,13 @@ def multi_head_attention_forward2(
     #
     q = q.contiguous().view(tgt_len, bsz * num_heads, head_dim).transpose(0, 1)
     if static_k is None:
-        k = k.contiguous().view(k.shape[0], bsz * num_heads, head_dim).transpose(0, 1)
+        if key_value_group_into is None:
+            k = k.contiguous().view(k.shape[0], bsz * num_heads, head_dim).transpose(0, 1)
+        else:
+            k = einops.rearrange(k, 't (num_heads head_dim) d -> (t num_heads) d head_dim', num_heads=num_heads, head_dim=head_dim)
+            # k2 = k.permute(2, 0, 1)
+            # k2 = k2.contiguous().view(k2.shape[0], bsz * num_heads, head_dim).transpose(0, 1)
+            # dummy = 1
     else:
         # TODO finish disentangling control flow so we don't do in-projections when statics are passed
         assert static_k.size(0) == bsz * num_heads, \
@@ -667,7 +683,10 @@ def multi_head_attention_forward2(
             f"expecting static_k.size(2) of {head_dim}, but got {static_k.size(2)}"
         k = static_k
     if static_v is None:
-        v = v.contiguous().view(v.shape[0], bsz * num_heads, head_dim).transpose(0, 1)
+        if key_value_group_into is None:
+            v = v.contiguous().view(v.shape[0], bsz * num_heads, head_dim).transpose(0, 1)
+        else:
+            v = einops.rearrange(v, 't (num_heads head_dim) d -> (t num_heads) d head_dim', num_heads=num_heads, head_dim=head_dim)
     else:
         # TODO finish disentangling control flow so we don't do in-projections when statics are passed
         assert static_v.size(0) == bsz * num_heads, \

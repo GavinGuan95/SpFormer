@@ -11,6 +11,8 @@ MODEL:
 
     BACKBONE_3D:
         NAME: VoxelTransformer
+        REDUCED_ATTENTION_KEY_CALC_IN_STRIDED: True
+        AVOID_REPEATED_COORD_CALC_IN_SUBM: True
         USE_RELATIVE_COORDS: False
         USE_POOLED_FEATURE: False
         USE_NO_QUERY_COORDS: True

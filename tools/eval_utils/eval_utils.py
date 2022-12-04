@@ -75,6 +75,8 @@ def eval_one_epoch(cfg, model, dataloader, epoch_id, logger, dist_test=False, sa
             progress_bar.update()
 
         if i > 10:
+            average_voxel_transformer_time = np.mean(model.time_list[2:])
+            print(f"Average voxel transformer time: {average_voxel_transformer_time}")
             break
 
     if cfg.LOCAL_RANK == 0:

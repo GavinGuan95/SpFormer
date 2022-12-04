@@ -1,13 +1,25 @@
+import torch.cuda
+
 from .detector3d_template import Detector3DTemplate
+import timeit
+from ..backbones_3d.votr_backbone import VoxelTransformer
 
 class VoTrSSD(Detector3DTemplate):
     def __init__(self, model_cfg, num_class, dataset):
         super().__init__(model_cfg=model_cfg, num_class=num_class, dataset=dataset)
         self.module_list = self.build_networks()
+        self.time_list = []
 
     def forward(self, batch_dict):
         for cur_module in self.module_list:
+            if isinstance(cur_module, VoxelTransformer):
+                torch.cuda.synchronize()
+                start_time = timeit.default_timer()
             batch_dict = cur_module(batch_dict)
+            if isinstance(cur_module, VoxelTransformer):
+                torch.cuda.synchronize()
+                end_time = timeit.default_timer()
+                self.time_list.append(end_time - start_time)
 
         if self.training:
             loss, tb_dict, disp_dict = self.get_training_loss()
