@@ -184,6 +184,164 @@ void downsample_with_hash_kernel_launcher(int x_max, int y_max, int z_max, int x
 
 }
 
+__global__ void downsample_with_hash_with_features_kernel(int x_max, int y_max, int z_max, int x_stride, int y_stride, int z_stride,
+                                                int num_voxels, int num_ds_voxels, int hash_size,
+                                                const int *v_indices, int *ds_v_indices_features, int *xyz_to_vidx, int *vcount) {
+    /*
+        v_indices: [num_voxels, 4] bs + zyx indices of voxels
+        ds_v_indices_features: [bs, num_ds_voxels, 3+1] downsampled voxels, -1 if not unique
+        xyz_to_vidx: [bs, hash_size, 2] downsampled dense map
+        vcount: [bs]
+    */
+
+    int th_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (th_idx >= num_voxels) return;
+
+    int bs_idx = v_indices[th_idx * 4 + 0];
+    int z_idx = v_indices[th_idx * 4 + 1];
+    int y_idx = v_indices[th_idx * 4 + 2];
+    int x_idx = v_indices[th_idx * 4 + 3];
+
+    int ds_z_idx = z_idx / z_stride;
+    int ds_y_idx = y_idx / y_stride;
+    int ds_x_idx = x_idx / x_stride;
+
+    if (ds_x_idx >= x_max || ds_x_idx < 0 || ds_y_idx < 0 || ds_y_idx >= y_max || ds_z_idx < 0 || ds_z_idx >= z_max) return;
+
+    xyz_to_vidx += bs_idx * hash_size * 2;
+    ds_v_indices_features += bs_idx * num_ds_voxels * (3+1);
+
+    int key = ds_x_idx * y_max * z_max + ds_y_idx * z_max + ds_z_idx;
+    // hash table with force insert, reject duplicates
+    int hash_idx = hash(key, hash_size);
+    int prob_cnt = 0;
+    while(true) {
+        int prev_key = atomicCAS(xyz_to_vidx + hash_idx*2 + 0, EMPTY_KEY, key); // insert key when empty
+        if (prev_key == EMPTY_KEY) {
+            int v_idx = atomicAdd(vcount + bs_idx, 1);
+            ds_v_indices_features[v_idx * (3+1) + 0] = ds_z_idx; // insert zyx to ds_indices
+            ds_v_indices_features[v_idx * (3+1) + 1] = ds_y_idx;
+            ds_v_indices_features[v_idx * (3+1) + 2] = ds_x_idx;
+            ds_v_indices_features[v_idx * (3+1) + 3] = th_idx;
+            xyz_to_vidx[hash_idx*2 + 1] = v_idx; // insert value to hash table
+            break;
+        } else if (prev_key == key) { // already occupied
+            break;
+        }
+        // linear probing
+        hash_idx = (hash_idx + 1) % hash_size;
+        // security in case of dead loop
+        prob_cnt += 1;
+        if (prob_cnt >= hash_size) break;
+    }
+}
+
+
+void downsample_with_hash_with_features_kernel_launcher(int x_max, int y_max, int z_max, int x_stride, int y_stride, int z_stride,
+                                                int num_voxels, int num_ds_voxels, int hash_size,
+                                                const int *v_indices, int *ds_v_indices_features, int *xyz_to_vidx, int *vcount) {
+
+    cudaError_t err;
+
+    dim3 blocks(DIVUP(num_voxels, THREADS_PER_BLOCK));  // blockIdx.x(col), blockIdx.y(row)
+    dim3 threads(THREADS_PER_BLOCK);
+
+    downsample_with_hash_with_features_kernel<<<blocks, threads>>>(x_max, y_max, z_max, x_stride, y_stride, z_stride,
+                                                num_voxels, num_ds_voxels, hash_size,
+                                                v_indices, ds_v_indices_features, xyz_to_vidx, vcount);
+    // cudaDeviceSynchronize();  // for using printf in kernel function
+    err = cudaGetLastError();
+    if (cudaSuccess != err) {
+        fprintf(stderr, "CUDA kernel failed : %s\n", cudaGetErrorString(err));
+        exit(-1);
+    }
+
+}
+
+
+__global__ void downsample_with_hash_with_features_reuse_densemap_stridetag_kernel(int x_max, int y_max, int z_max, int x_stride, int y_stride, int z_stride,
+                                                int accu_x_stride,
+                                                int num_voxels, int num_ds_voxels, int hash_size,
+                                                const int *v_indices, int *ds_v_indices_features, int *xyz_to_vidx, int *vcount) {
+    /*
+        v_indices: [num_voxels, 4] bs + zyx indices of voxels
+        ds_v_indices_features: [bs, num_ds_voxels, 3+1] downsampled voxels, -1 if not unique
+        xyz_to_vidx: [bs, hash_size, 2] downsampled dense map
+        vcount: [bs]
+    */
+
+    int th_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (th_idx >= num_voxels) return;
+
+    int bs_idx = v_indices[th_idx * 4 + 0];
+    int z_idx = v_indices[th_idx * 4 + 1];
+    int y_idx = v_indices[th_idx * 4 + 2];
+    int x_idx = v_indices[th_idx * 4 + 3];
+
+    int ds_z_idx = z_idx / z_stride;
+    int ds_y_idx = y_idx / y_stride;
+    int ds_x_idx = x_idx / x_stride;
+
+    if (ds_x_idx >= x_max || ds_x_idx < 0 || ds_y_idx < 0 || ds_y_idx >= y_max || ds_z_idx < 0 || ds_z_idx >= z_max) return;
+
+    xyz_to_vidx += bs_idx * hash_size * 2;
+    ds_v_indices_features += bs_idx * num_ds_voxels * (3+1);
+
+    int key = ds_x_idx * y_max * z_max + ds_y_idx * z_max + ds_z_idx;
+    // hash table with force insert, reject duplicates
+    int hash_idx = hash(key, hash_size);
+    int prob_cnt = 0;
+    int cur_stride = log2(accu_x_stride); //
+    int key_insert = key | (cur_stride << 28); //
+    while(true) {
+        int prev_key = atomicExch(xyz_to_vidx + hash_idx*2 + 0, key_insert); // insert key when empty
+        //int prev_key = atomicCAS(xyz_to_vidx + hash_idx*2 + 0, EMPTY_KEY, key_insert);
+        int prev_stride = (prev_key & 0x70000000) >> 28; //
+        if (prev_key == EMPTY_KEY || prev_stride != cur_stride){
+            int v_idx = atomicAdd(vcount + bs_idx, 1);
+            ds_v_indices_features[v_idx * (3+1) + 0] = ds_z_idx; // insert zyx to ds_indices
+            ds_v_indices_features[v_idx * (3+1) + 1] = ds_y_idx;
+            ds_v_indices_features[v_idx * (3+1) + 2] = ds_x_idx;
+            ds_v_indices_features[v_idx * (3+1) + 3] = th_idx;
+            xyz_to_vidx[hash_idx*2 + 1] = v_idx; // insert value to hash table
+            break;
+        }
+        else if (prev_key == key_insert){ //same stride, already occupied
+            break;
+        }
+        atomicExch(xyz_to_vidx + hash_idx*2 + 0, prev_key);
+        // linear probing
+        hash_idx = (hash_idx + 1) % hash_size;
+        // security in case of dead loop
+        prob_cnt += 1;
+        if (prob_cnt >= hash_size) break;
+    }
+}
+
+
+void downsample_with_hash_with_features_reuse_densemap_stridetag_kernel_launcher(int x_max, int y_max, int z_max, int x_stride, int y_stride, int z_stride,
+                                                int accu_x_stride,
+                                                int num_voxels, int num_ds_voxels, int hash_size,
+                                                const int *v_indices, int *ds_v_indices_features, int *xyz_to_vidx, int *vcount) {
+
+    cudaError_t err;
+
+    dim3 blocks(DIVUP(num_voxels, THREADS_PER_BLOCK));  // blockIdx.x(col), blockIdx.y(row)
+    dim3 threads(THREADS_PER_BLOCK);
+
+    downsample_with_hash_with_features_reuse_densemap_stridetag_kernel<<<blocks, threads>>>(x_max, y_max, z_max, x_stride, y_stride, z_stride,
+                                                accu_x_stride,
+                                                num_voxels, num_ds_voxels, hash_size,
+                                                v_indices, ds_v_indices_features, xyz_to_vidx, vcount);
+    // cudaDeviceSynchronize();  // for using printf in kernel function
+    err = cudaGetLastError();
+    if (cudaSuccess != err) {
+        fprintf(stderr, "CUDA kernel failed : %s\n", cudaGetErrorString(err));
+        exit(-1);
+    }
+
+}
+
 __global__ void build_mapping_with_tensor_kernel(int x_max, int y_max, int z_max, int num_voxels,
                                                     const int *v_indices, const int *v_bs_cnt, int *xyz_to_vidx) {
     /*

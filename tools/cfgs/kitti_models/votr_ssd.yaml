@@ -11,6 +11,9 @@ MODEL:
 
     BACKBONE_3D:
         NAME: VoxelTransformer
+        OPTIMIZE_ARRAY_INIT: False
+        REDUCE_REDUNDANT_GATHER: False
+        STRIDE_TAG_REUSE_DENSEMAP: False
         USE_RELATIVE_COORDS: True
         USE_POOLED_FEATURE: True
         USE_NO_QUERY_COORDS: True

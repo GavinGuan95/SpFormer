@@ -42,4 +42,27 @@ void downsample_with_hash_kernel_launcher(int x_max, int y_max, int z_max, int x
                                                 int num_voxels, int num_ds_voxels, int hash_size,
                                                 const int *v_indices, int *ds_v_indices,
                                                 int *xyz_to_vidx, int *vcount);
+
+int downsample_with_hash_with_features_wrapper(int x_max, int y_max, int z_max, int x_stride, int y_stride, int z_stride,
+                                            int num_voxels, int num_ds_voxels, int hash_size,
+                                            at::Tensor v_indices_tensor, at::Tensor ds_v_indices_features_tensor,
+                                            at::Tensor xyz_to_vidx_tensor, at::Tensor vcount_tensor);
+
+void downsample_with_hash_with_features_kernel_launcher(int x_max, int y_max, int z_max, int x_stride, int y_stride, int z_stride,
+                                                int num_voxels, int num_ds_voxels, int hash_size,
+                                                const int *v_indices, int *ds_v_indices_features,
+                                                int *xyz_to_vidx, int *vcount);
+
+int downsample_with_hash_with_features_reuse_densemap_stridetag_wrapper(int x_max, int y_max, int z_max, int x_stride, int y_stride, int z_stride,
+                                            int accu_x_stride,
+                                            int num_voxels, int num_ds_voxels, int hash_size,
+                                            at::Tensor v_indices_tensor, at::Tensor ds_v_indices_features_tensor,
+                                            at::Tensor xyz_to_vidx_tensor, at::Tensor vcount_tensor);
+
+void downsample_with_hash_with_features_reuse_densemap_stridetag_kernel_launcher(int x_max, int y_max, int z_max, int x_stride, int y_stride, int z_stride,
+                                                int accu_x_stride,
+                                                int num_voxels, int num_ds_voxels, int hash_size,
+                                                const int *v_indices, int *ds_v_indices_features,
+                                                int *xyz_to_vidx, int *vcount);
+
 #endif
