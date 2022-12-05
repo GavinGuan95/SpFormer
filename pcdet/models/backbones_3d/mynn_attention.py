@@ -86,7 +86,8 @@ class MultiheadAttention(nn.Module):
         super(MultiheadAttention, self).__setstate__(state)
 
     def forward(self, query: Tensor, key: Tensor, value: Tensor, key_padding_mask: Optional[Tensor] = None,
-                need_weights: bool = True, attn_mask: Optional[Tensor] = None, key_value_group_into: Optional[dict] = None) -> Tuple[Tensor, Optional[Tensor]]:
+                need_weights: bool = True, attn_mask: Optional[Tensor] = None, key_value_group_into: Optional[dict] = None,
+                optimize_grouping_operation: bool = False) -> Tuple[Tensor, Optional[Tensor]]:
         r"""
     Args:
         query: Query embeddings of shape :math:`(L, N, E_q)` when ``batch_first=False`` or :math:`(N, L, E_q)`
@@ -136,7 +137,8 @@ class MultiheadAttention(nn.Module):
                 key_padding_mask=key_padding_mask, need_weights=need_weights,
                 attn_mask=attn_mask, use_separate_proj_weight=True,
                 q_proj_weight=self.q_proj_weight, k_proj_weight=self.k_proj_weight,
-                v_proj_weight=self.v_proj_weight, key_value_group_into=key_value_group_into)
+                v_proj_weight=self.v_proj_weight, key_value_group_into=key_value_group_into,
+                optimize_grouping_operation=optimize_grouping_operation)
         else:
             attn_output, attn_output_weights = myfunctional_attention.multi_head_attention_forward2(
                 query, key, value, self.embed_dim, self.num_heads,
@@ -145,7 +147,8 @@ class MultiheadAttention(nn.Module):
                 self.dropout, self.out_proj.weight, self.out_proj.bias,
                 training=self.training,
                 key_padding_mask=key_padding_mask, need_weights=need_weights,
-                attn_mask=attn_mask, key_value_group_into=key_value_group_into)
+                attn_mask=attn_mask, key_value_group_into=key_value_group_into,
+                optimize_grouping_operation=optimize_grouping_operation)
         if self.batch_first:
             return attn_output.transpose(1, 0), attn_output_weights
         else:

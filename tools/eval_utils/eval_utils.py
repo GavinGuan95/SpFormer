@@ -1,5 +1,5 @@
 import pickle
-import time
+import timeit
 
 import numpy as np
 import torch
@@ -49,9 +49,8 @@ def eval_one_epoch(cfg, model, dataloader, epoch_id, logger, dist_test=False, sa
         )
     model.eval()
 
-    if cfg.LOCAL_RANK == 0:
-        progress_bar = tqdm.tqdm(total=len(dataloader), leave=True, desc='eval', dynamic_ncols=True)
-    start_time = time.time()
+    # if cfg.LOCAL_RANK == 0:
+    #     progress_bar = tqdm.tqdm(total=len(dataloader), leave=True, desc='eval', dynamic_ncols=True)
     # with torch.profiler.profile(
     #         schedule=torch.profiler.schedule(
     #             wait=2,
@@ -61,15 +60,17 @@ def eval_one_epoch(cfg, model, dataloader, epoch_id, logger, dist_test=False, sa
     #         on_trace_ready=torch.profiler.tensorboard_trace_handler(tb_dir),
     #         # with_trace=True
     # ) as profiler:
+    warmup_iters = 10
+    total_iters = 510
+    do_synchronize = False
     for i, batch_dict in enumerate(dataloader):
-
         # add temperature for adpative radius learning
         if cfg.OPTIMIZATION.get('USE_TEMPERATURE', False):
             batch_dict.update({'temperature': cfg.OPTIMIZATION.DECAY_TEMPERATURE[-1]})
 
         load_data_to_gpu(batch_dict)
         with torch.no_grad():
-            pred_dicts, ret_dict = model(batch_dict)
+            pred_dicts, ret_dict = model(batch_dict, do_synchronize=do_synchronize)
         disp_dict = {}
 
         statistics_info(cfg, ret_dict, metric, disp_dict)
@@ -78,14 +79,17 @@ def eval_one_epoch(cfg, model, dataloader, epoch_id, logger, dist_test=False, sa
             output_path=final_output_dir if save_to_file else None
         )
         det_annos += annos
-        if cfg.LOCAL_RANK == 0:
-            progress_bar.set_postfix(disp_dict)
-            progress_bar.update()
-        if i >= 500:
+        # if cfg.LOCAL_RANK == 0:
+        #     progress_bar.set_postfix(disp_dict)
+        #     progress_bar.update()
+        if i == warmup_iters - 1:
+            start_time = timeit.default_timer()
+        if i >= total_iters:
+            end_time = timeit.default_timer()
             break
 
-    if cfg.LOCAL_RANK == 0:
-        progress_bar.close()
+    # if cfg.LOCAL_RANK == 0:
+    #     progress_bar.close()
 
     if dist_test:
         rank, world_size = common_utils.get_dist_info()
@@ -93,10 +97,12 @@ def eval_one_epoch(cfg, model, dataloader, epoch_id, logger, dist_test=False, sa
         metric = common_utils.merge_results_dist([metric], world_size, tmpdir=result_dir / 'tmpdir')
 
     logger.info('*************** Performance of EPOCH %s *****************' % epoch_id)
-    sec_per_example = (time.time() - start_time) / (501*2) #len(dataloader.dataset)
-    votr_sec_per_example = model.votr_time / (501*2) #len(dataloader.dataset)
-    logger.info('Generate label finished(sec_per_example: %.4f second).' % sec_per_example)
-    logger.info('Generate label finished(votr_sec_per_example: %.4f second).' % votr_sec_per_example)
+    sec_per_example = (end_time - start_time) / (total_iters - warmup_iters) #len(dataloader.dataset)
+    votr_sec_per_example = sum(model.time_list[warmup_iters:]) / (total_iters - warmup_iters) #len(dataloader.dataset)
+    if not do_synchronize:
+        logger.warning('Generate label finished(sec_per_example: %.4f second).' % sec_per_example)
+    else:
+        logger.warning('Generate label finished(votr_sec_per_example: %.4f second).' % votr_sec_per_example)
 
     if cfg.LOCAL_RANK != 0:
         return {}

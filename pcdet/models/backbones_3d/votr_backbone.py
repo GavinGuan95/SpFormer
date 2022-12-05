@@ -111,7 +111,7 @@ class Attention3d(nn.Module):
 class SparseAttention3d(Attention3d):
     def __init__(self, input_channels, output_channels, ff_channels, dropout, num_heads, attention_modes, strides, num_ds_voxels,
                  use_relative_coords = False, use_pooled_feature = False, use_no_query_coords = False,
-                 reduced_attention_key_calc_in_strided=False,
+                 reduced_attention_key_calc_in_strided=False, optimize_grouping_operation=False,
                  optimize_array_init = False, reduce_redundant_gather = False, stride_tag_reuse_densemap = False):
         super(SparseAttention3d, self).__init__(input_channels, output_channels, ff_channels, dropout, num_heads, attention_modes)
 
@@ -119,6 +119,7 @@ class SparseAttention3d(Attention3d):
         self.use_pooled_features = use_pooled_feature
         self.use_no_query_coords = use_no_query_coords
         self.reduced_attention_key_calc_in_strided = reduced_attention_key_calc_in_strided
+        self.optimize_grouping_operation = optimize_grouping_operation
         self.optimize_array_init = optimize_array_init
         self.reduce_redundant_gather = reduce_redundant_gather
         self.stride_tag_reuse_densemap = stride_tag_reuse_densemap
@@ -230,14 +231,14 @@ class SparseAttention3d(Attention3d):
 
         # with torch.profiler.record_function("votr_utils.grouping_operation"):
         # Gavin: double check this part after merging
-        if self.reduce_redundant_gather:
-            key_features = votr_utils.grouping_operation(new_features, k_bs_cnt, key_indices, k_bs_cnt)
-            new_voxel_coords = self.with_coords(new_indices, sp_tensor.point_cloud_range, new_voxel_size)
-            key_coords = votr_utils.grouping_operation(new_voxel_coords, k_bs_cnt, key_indices, k_bs_cnt)
-        else:
-            key_features = votr_utils.grouping_operation(voxel_features, v_bs_cnt, key_indices, k_bs_cnt)
-            voxel_coords = self.with_coords(sp_tensor.indices, sp_tensor.point_cloud_range, sp_tensor.voxel_size)
-            key_coords = votr_utils.grouping_operation(voxel_coords, v_bs_cnt, key_indices, k_bs_cnt)
+        # if self.reduce_redundant_gather:
+        #     key_features = votr_utils.grouping_operation(new_features, k_bs_cnt, key_indices, k_bs_cnt)
+        #     new_voxel_coords = self.with_coords(new_indices, sp_tensor.point_cloud_range, new_voxel_size)
+        #     key_coords = votr_utils.grouping_operation(new_voxel_coords, k_bs_cnt, key_indices, k_bs_cnt)
+        # else:
+        #     key_features = votr_utils.grouping_operation(voxel_features, v_bs_cnt, key_indices, k_bs_cnt)
+        #     voxel_coords = self.with_coords(sp_tensor.indices, sp_tensor.point_cloud_range, sp_tensor.voxel_size)
+        #     key_coords = votr_utils.grouping_operation(voxel_coords, v_bs_cnt, key_indices, k_bs_cnt)
 
         query_coords = self.with_coords(new_indices, sp_tensor.point_cloud_range, new_voxel_size)
         query_pre_features = self.q_pos_proj(query_coords).unsqueeze(0)
@@ -250,6 +251,7 @@ class SparseAttention3d(Attention3d):
                 value = voxel_features,
                 key_padding_mask = key_mask,
                 key_value_group_into ={'v_bs_cnt': v_bs_cnt, 'key_indices': key_indices, 'k_bs_cnt': k_bs_cnt},
+                optimize_grouping_operation = self.optimize_grouping_operation,
             )
 
         else:
@@ -288,7 +290,7 @@ class SparseAttention3d(Attention3d):
 class SubMAttention3d(Attention3d):
     def __init__(self, input_channels, output_channels, ff_channels, dropout, num_heads, attention_modes,
                  use_pos_emb = True, use_relative_coords = False, use_no_query_coords = False,
-                 avoid_repeated_coord_calc_in_subm=False,
+                 avoid_repeated_coord_calc_in_subm=False, optimize_grouping_operation=False,
                  optimize_array_init=False):
         super(SubMAttention3d, self).__init__(input_channels, output_channels, ff_channels, dropout, num_heads, attention_modes)
 
@@ -296,6 +298,7 @@ class SubMAttention3d(Attention3d):
         self.use_no_query_coords = use_no_query_coords
         self.use_pos_emb = use_pos_emb
         self.avoid_repeated_coord_calc_in_subm = avoid_repeated_coord_calc_in_subm
+        self.optimize_grouping_operation = optimize_grouping_operation
         self.optimize_array_init = optimize_array_init
 
         self.norm1 = nn.BatchNorm1d(input_channels)
@@ -306,10 +309,16 @@ class SubMAttention3d(Attention3d):
                     nn.Linear(3, input_channels),
                     nn.ReLU(),
                 )
-            self.k_pos_proj = nn.Sequential(
-                nn.Conv1d(3, input_channels, 1),
-                nn.ReLU(),
-            )
+            if self.optimize_grouping_operation:
+                self.k_pos_proj = nn.Sequential(
+                    nn.Linear(3, input_channels),
+                    nn.ReLU(),
+                )
+            else:
+                self.k_pos_proj = nn.Sequential(
+                    nn.Conv1d(3, input_channels, 1),
+                    nn.ReLU(),
+                )
 
     @torch.no_grad()
     def create_gather_dict(self, attention_modes, map_table, voxel_indices, spatial_shape):
@@ -351,15 +360,24 @@ class SubMAttention3d(Attention3d):
             key_mask = torch.cat(a_key_mask, dim = 1)
 
         query_features = voxel_features.unsqueeze(0) # (1, N1+N2, C)
-        key_features = votr_utils.grouping_operation(voxel_features, v_bs_cnt, key_indices, k_bs_cnt)
+        if self.optimize_grouping_operation:
+            key_features = votr_utils.grouping_operation_optimized(voxel_features, v_bs_cnt, key_indices, k_bs_cnt)
+        else:
+            key_features = votr_utils.grouping_operation(voxel_features, v_bs_cnt, key_indices, k_bs_cnt)
 
         if self.use_pos_emb:
             if voxel_coords is None or not self.avoid_repeated_coord_calc_in_subm:
                 voxel_coords = self.with_coords(sp_tensor.indices, sp_tensor.point_cloud_range, sp_tensor.voxel_size)
             if key_coords is None or not self.avoid_repeated_coord_calc_in_subm:
-                key_coords = votr_utils.grouping_operation(voxel_coords, v_bs_cnt, key_indices, k_bs_cnt)
+                if self.optimize_grouping_operation:
+                    key_coords = votr_utils.grouping_operation_optimized(voxel_coords, v_bs_cnt, key_indices, k_bs_cnt)
+                else:
+                    key_coords = votr_utils.grouping_operation(voxel_coords, v_bs_cnt, key_indices, k_bs_cnt)
             if self.use_relative_coords:
-                key_coords = key_coords - voxel_coords.unsqueeze(-1)
+                if self.optimize_grouping_operation:
+                    key_coords = key_coords - voxel_coords.unsqueeze(1)
+                else:
+                    key_coords = key_coords - voxel_coords.unsqueeze(-1)
             key_pos_emb = self.k_pos_proj(key_coords)
             key_features = key_features + key_pos_emb
 
@@ -369,7 +387,10 @@ class SubMAttention3d(Attention3d):
                 query_pos_emb = self.q_pos_proj(voxel_coords).unsqueeze(0)
                 query_features = query_features + query_pos_emb
 
-        key_features = key_features.permute(2, 0, 1).contiguous() # (size, N1+N2, C)
+        if self.optimize_grouping_operation:
+            key_features = key_features.permute(1, 0, 2).contiguous() # (size, N1+N2, C)
+        else:
+            key_features = key_features.permute(2, 0, 1).contiguous() # (size, N1+N2, C)
 
         attend_features, attend_weights = self.mhead_attention(
             query = query_features,
@@ -394,7 +415,7 @@ class SubMAttention3d(Attention3d):
 
 class AttentionResBlock(nn.Module):
     def __init__(self, model_cfg, use_relative_coords=False, use_pooled_feature=False, use_no_query_coords=False,
-                 reduced_attention_key_calc_in_strided=False, avoid_repeated_coord_calc_in_subm=False,
+                 reduced_attention_key_calc_in_strided=False, avoid_repeated_coord_calc_in_subm=False, optimize_grouping_operation=False,
                  optimize_array_init=False, reduce_redundant_gather=False, stride_tag_reuse_densemap=False):
         super(AttentionResBlock, self).__init__()
         sp_cfg = model_cfg.SP_CFGS
@@ -411,6 +432,7 @@ class AttentionResBlock(nn.Module):
             use_pooled_feature = use_pooled_feature,
             use_no_query_coords= use_no_query_coords,
             reduced_attention_key_calc_in_strided= reduced_attention_key_calc_in_strided,
+            optimize_grouping_operation=optimize_grouping_operation,
             optimize_array_init = optimize_array_init,
             reduce_redundant_gather = reduce_redundant_gather,
             stride_tag_reuse_densemap = stride_tag_reuse_densemap,
@@ -429,6 +451,7 @@ class AttentionResBlock(nn.Module):
                 use_relative_coords = use_relative_coords,
                 use_no_query_coords= use_no_query_coords,
                 avoid_repeated_coord_calc_in_subm= avoid_repeated_coord_calc_in_subm,
+                optimize_grouping_operation=optimize_grouping_operation,
                 optimize_array_init=optimize_array_init,
             ))
         self.avoid_repeated_coord_calc_in_subm = avoid_repeated_coord_calc_in_subm
@@ -474,9 +497,10 @@ class VoxelTransformer(nn.Module):
         self.backbone = nn.ModuleList()
         for param in self.model_cfg.PARAMS:
             self.backbone.append(AttentionResBlock(param, self.use_relative_coords, self.use_pooled_feature, self.use_no_query_coords,
-                                                   self.optimize_array_init, self.reduce_redundant_gather, self.stride_tag_reuse_densemap,
                                                    self.model_cfg.REDUCED_ATTENTION_KEY_CALC_IN_STRIDED,
-                                                   self.model_cfg.AVOID_REPEATED_COORD_CALC_IN_SUBM
+                                                   self.model_cfg.AVOID_REPEATED_COORD_CALC_IN_SUBM,
+                                                   self.model_cfg.OPTIMIZE_GROUPING_OPERATION,
+                                                   self.optimize_array_init, self.reduce_redundant_gather, self.stride_tag_reuse_densemap,
                                                    ))
 
         self.num_point_features = self.model_cfg.NUM_OUTPUT_FEATURES

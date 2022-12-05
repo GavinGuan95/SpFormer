@@ -17,6 +17,21 @@ from pcdet.models import build_network
 from pcdet.utils import common_utils
 
 
+def update_cfg(args, cfg):
+    if 1 in args.optimizations:
+        cfg.MODEL.BACKBONE_3D.OPTIMIZE_ARRAY_INIT = True
+    if 2 in args.optimizations:
+        cfg.MODEL.BACKBONE_3D.REDUCE_REDUNDANT_GATHER = True
+    if 3 in args.optimizations:
+        cfg.MODEL.BACKBONE_3D.STRIDE_TAG_REUSE_DENSEMAP = True
+    if 4 in args.optimizations:
+        cfg.MODEL.BACKBONE_3D.REDUCED_ATTENTION_KEY_CALC_IN_STRIDED = True
+    if 5 in args.optimizations:
+        cfg.MODEL.BACKBONE_3D.AVOID_REPEATED_COORD_CALC_IN_SUBM = True
+    if 6 in args.optimizations:
+        cfg.MODEL.BACKBONE_3D.OPTIMIZE_GROUPING_OPERATION = True
+
+
 def parse_config():
     parser = argparse.ArgumentParser(description='arg parser')
     parser.add_argument('--cfg_file', type=str, default=None, help='specify the config for training')
@@ -43,12 +58,15 @@ def parse_config():
     parser.add_argument('--for_test', action='store_true', default=False, help='test for the test split')
 
     parser.add_argument('--random_seed', type=int, default=None, help='set fixed random seed')
+    parser.add_argument('--optimizations', nargs="+", type=int)
 
     args = parser.parse_args()
 
     cfg_from_yaml_file(args.cfg_file, cfg)
     cfg.TAG = Path(args.cfg_file).stem
     cfg.EXP_GROUP_PATH = '/'.join(args.cfg_file.split('/')[1:-1])  # remove 'cfgs' and 'xxxx.yaml'
+
+    update_cfg(args, cfg)
 
     if args.random_seed is not None:
         np.random.seed(args.random_seed)
@@ -230,8 +248,5 @@ def main():
 
 
 if __name__ == '__main__':
-    import timeit
-    start_time = timeit.default_timer()
     main()
-    end_time = timeit.default_timer()
-    print('Time: {:.2f}s'.format(end_time - start_time))
+

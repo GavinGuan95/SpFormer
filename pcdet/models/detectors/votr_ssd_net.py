@@ -7,16 +7,15 @@ class VoTrSSD(Detector3DTemplate):
     def __init__(self, model_cfg, num_class, dataset):
         super().__init__(model_cfg=model_cfg, num_class=num_class, dataset=dataset)
         self.module_list = self.build_networks()
-        self.votr_time = 0
         self.time_list = []
 
-    def forward(self, batch_dict):
+    def forward(self, batch_dict, do_synchronize=False):
         for cur_module in self.module_list:
-            if isinstance(cur_module, VoxelTransformer):
+            if do_synchronize and isinstance(cur_module, VoxelTransformer):
                 torch.cuda.synchronize()
                 start_time = timeit.default_timer()
             batch_dict = cur_module(batch_dict)
-            if isinstance(cur_module, VoxelTransformer):
+            if do_synchronize and isinstance(cur_module, VoxelTransformer):
                 torch.cuda.synchronize()
                 end_time = timeit.default_timer()
                 self.time_list.append(end_time - start_time)
