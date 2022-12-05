@@ -25,6 +25,10 @@ int subm_strided_attention_with_hash_wrapper(int x_max, int y_max, int z_max, in
                                                 at::Tensor attend_indices_tensor, at::Tensor v_indices_tensor,
                                                 at::Tensor xyz_to_vidx_tensor, at::Tensor range_spec_tensor);
 
+int subm_strided_attention_with_hash_reuse_densemap_stridetag_wrapper(int x_max, int y_max, int z_max, int accu_x_stride, int num_voxels, int attend_size, int num_range, int hash_size,
+                                                at::Tensor attend_indices_tensor, at::Tensor v_indices_tensor,
+                                                at::Tensor xyz_to_vidx_tensor, at::Tensor range_spec_tensor);
+
 void subm_local_attention_with_tensor_kernel_launcher(int x_max, int y_max, int z_max, int num_voxels, int attend_size, int attend_range,
                                                         int *attend_indices, const int *v_indices, const int *xyz_to_vidx);
 
@@ -35,6 +39,9 @@ void subm_strided_attention_with_tensor_kernel_launcher(int x_max, int y_max, in
                                                             int *attend_indices, const int *v_indices, const int *xyz_to_vidx, const int *range_spec);
 
 void subm_strided_attention_with_hash_kernel_launcher(int x_max, int y_max, int z_max, int num_voxels, int attend_size, int num_range, int hash_size,
+                                                            int *attend_indices, const int *v_indices, const int *xyz_to_vidx, const int *range_spec);
+
+void subm_strided_attention_with_hash_reuse_densemap_stridetag_kernel_launcher(int x_max, int y_max, int z_max, int accu_x_stride, int num_voxels, int attend_size, int num_range, int hash_size,
                                                             int *attend_indices, const int *v_indices, const int *xyz_to_vidx, const int *range_spec);
 
 int sparse_local_attention_with_tensor_wrapper(int x_max, int y_max, int z_max, int x_stride, int y_stride, int z_stride,

@@ -1,5 +1,4 @@
-import torch.cuda
-
+import torch
 from .detector3d_template import Detector3DTemplate
 import timeit
 from ..backbones_3d.votr_backbone import VoxelTransformer
@@ -8,6 +7,7 @@ class VoTrSSD(Detector3DTemplate):
     def __init__(self, model_cfg, num_class, dataset):
         super().__init__(model_cfg=model_cfg, num_class=num_class, dataset=dataset)
         self.module_list = self.build_networks()
+        self.votr_time = 0
         self.time_list = []
 
     def forward(self, batch_dict):
