@@ -18,18 +18,19 @@ from pcdet.utils import common_utils
 
 
 def update_cfg(args, cfg):
-    if 1 in args.optimizations:
-        cfg.MODEL.BACKBONE_3D.OPTIMIZE_ARRAY_INIT = True
-    if 2 in args.optimizations:
-        cfg.MODEL.BACKBONE_3D.REDUCE_REDUNDANT_GATHER = True
-    if 3 in args.optimizations:
-        cfg.MODEL.BACKBONE_3D.STRIDE_TAG_REUSE_DENSEMAP = True
-    if 4 in args.optimizations:
-        cfg.MODEL.BACKBONE_3D.REDUCED_ATTENTION_KEY_CALC_IN_STRIDED = True
-    if 5 in args.optimizations:
-        cfg.MODEL.BACKBONE_3D.AVOID_REPEATED_COORD_CALC_IN_SUBM = True
-    if 6 in args.optimizations:
-        cfg.MODEL.BACKBONE_3D.OPTIMIZE_GROUPING_OPERATION = True
+    if isinstance(args.optimizations, list):
+        if 1 in args.optimizations:
+            cfg.MODEL.BACKBONE_3D.OPTIMIZE_ARRAY_INIT = True
+        if 2 in args.optimizations:
+            cfg.MODEL.BACKBONE_3D.REDUCE_REDUNDANT_GATHER = True
+        if 3 in args.optimizations:
+            cfg.MODEL.BACKBONE_3D.STRIDE_TAG_REUSE_DENSEMAP = True
+        if 4 in args.optimizations:
+            cfg.MODEL.BACKBONE_3D.REDUCED_ATTENTION_KEY_CALC_IN_STRIDED = True
+        if 5 in args.optimizations:
+            cfg.MODEL.BACKBONE_3D.AVOID_REPEATED_COORD_CALC_IN_SUBM = True
+        if 6 in args.optimizations:
+            cfg.MODEL.BACKBONE_3D.OPTIMIZE_GROUPING_OPERATION = True
 
 
 def parse_config():
@@ -59,6 +60,7 @@ def parse_config():
 
     parser.add_argument('--random_seed', type=int, default=None, help='set fixed random seed')
     parser.add_argument('--optimizations', nargs="+", type=int)
+    parser.add_argument('--test_votr_only', action='store_true', default=False)
 
     args = parser.parse_args()
 
@@ -87,7 +89,7 @@ def eval_single_ckpt(model, test_loader, args, eval_output_dir, logger, epoch_id
 
     # start evaluation
     eval_utils.eval_one_epoch(
-        cfg, model, test_loader, epoch_id, logger, dist_test=dist_test,
+        args, cfg, model, test_loader, epoch_id, logger, dist_test=dist_test,
         result_dir=eval_output_dir, save_to_file=args.save_to_file
     )
 
@@ -248,5 +250,8 @@ def main():
 
 
 if __name__ == '__main__':
+    import warnings
+    warnings.filterwarnings("ignore")
     main()
+    print("\n")
 

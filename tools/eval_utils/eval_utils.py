@@ -19,7 +19,7 @@ def statistics_info(cfg, ret_dict, metric, disp_dict):
         '(%d, %d) / %d' % (metric['recall_roi_%s' % str(min_thresh)], metric['recall_rcnn_%s' % str(min_thresh)], metric['gt_num'])
 
 
-def eval_one_epoch(cfg, model, dataloader, epoch_id, logger, dist_test=False, save_to_file=False, result_dir=None, tb_dir=None):
+def eval_one_epoch(args, cfg, model, dataloader, epoch_id, logger, dist_test=False, save_to_file=False, result_dir=None, tb_dir=None):
     tb_dir = './tensorboard_val'
     result_dir.mkdir(parents=True, exist_ok=True)
 
@@ -62,7 +62,6 @@ def eval_one_epoch(cfg, model, dataloader, epoch_id, logger, dist_test=False, sa
     # ) as profiler:
     warmup_iters = 10
     total_iters = 510
-    do_synchronize = False
     for i, batch_dict in enumerate(dataloader):
         # add temperature for adpative radius learning
         if cfg.OPTIMIZATION.get('USE_TEMPERATURE', False):
@@ -70,7 +69,7 @@ def eval_one_epoch(cfg, model, dataloader, epoch_id, logger, dist_test=False, sa
 
         load_data_to_gpu(batch_dict)
         with torch.no_grad():
-            pred_dicts, ret_dict = model(batch_dict, do_synchronize=do_synchronize)
+            pred_dicts, ret_dict = model(batch_dict, do_synchronize=args.test_votr_only)
         disp_dict = {}
 
         statistics_info(cfg, ret_dict, metric, disp_dict)
@@ -83,8 +82,12 @@ def eval_one_epoch(cfg, model, dataloader, epoch_id, logger, dist_test=False, sa
         #     progress_bar.set_postfix(disp_dict)
         #     progress_bar.update()
         if i == warmup_iters - 1:
+            if not args.test_votr_only:
+                torch.cuda.synchronize()
             start_time = timeit.default_timer()
         if i >= total_iters:
+            if not args.test_votr_only:
+                torch.cuda.synchronize()
             end_time = timeit.default_timer()
             break
 
@@ -97,11 +100,11 @@ def eval_one_epoch(cfg, model, dataloader, epoch_id, logger, dist_test=False, sa
         metric = common_utils.merge_results_dist([metric], world_size, tmpdir=result_dir / 'tmpdir')
 
     logger.info('*************** Performance of EPOCH %s *****************' % epoch_id)
-    sec_per_example = (end_time - start_time) / (total_iters - warmup_iters) #len(dataloader.dataset)
-    votr_sec_per_example = sum(model.time_list[warmup_iters:]) / (total_iters - warmup_iters) #len(dataloader.dataset)
-    if not do_synchronize:
+    if not args.test_votr_only:
+        sec_per_example = (end_time - start_time) / (total_iters - warmup_iters) #len(dataloader.dataset)
         logger.warning('Generate label finished(sec_per_example: %.4f second).' % sec_per_example)
     else:
+        votr_sec_per_example = sum(model.time_list[warmup_iters:]) / (total_iters - warmup_iters) #len(dataloader.dataset)
         logger.warning('Generate label finished(votr_sec_per_example: %.4f second).' % votr_sec_per_example)
 
     if cfg.LOCAL_RANK != 0:
