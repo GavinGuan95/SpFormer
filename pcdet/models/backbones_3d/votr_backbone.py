@@ -207,11 +207,16 @@ class SparseAttention3d(Attention3d):
         # new_spatial_shape, new_indices, new_map_table = self.downsample(sp_tensor)
         # new_spatial_shape, new_indices, new_map_table, old_feature_idx = self.downsample(sp_tensor)
         # with torch.profiler.record_function("self.downsample"):
+
+        # NINA: profile hash table
         new_spatial_shape, new_indices, new_map_table, old_feature_idx = self.downsample(sp_tensor)
         vx, vy, vz = sp_tensor.voxel_size
         new_voxel_size = [vx * self.strides[0], vy * self.strides[1], vz * self.strides[2]]
         # gather_dict = self.create_gather_dict(self.attention_modes, sp_tensor.map_table, new_indices, sp_tensor.spatial_shape)
         # with torch.profiler.record_function("self.create_gather_dict"):
+
+
+        # NINA: profile gather dict
         gather_dict = self.create_gather_dict(self.attention_modes, new_map_table, new_indices, new_spatial_shape)
 
         voxel_features = sp_tensor.features
@@ -244,6 +249,7 @@ class SparseAttention3d(Attention3d):
         query_pre_features = self.q_pos_proj(query_coords).unsqueeze(0)
 
         if self.reduced_attention_key_calc_in_strided:
+            # NINA: after: group + attention
             voxel_features = voxel_features.unsqueeze(0)
             attend_features, attend_weights = self.mhead_attention(
                 query = query_pre_features,
@@ -255,9 +261,12 @@ class SparseAttention3d(Attention3d):
             )
 
         else:
+
+            # NINA: before: profile group
             voxel_features_at_keys = votr_utils.grouping_operation(voxel_features, v_bs_cnt, key_indices, k_bs_cnt)
             voxel_features_at_keys = voxel_features_at_keys.permute(2, 0, 1).contiguous()
 
+            # NINA: before: profile attention
             attend_features, attend_weights = self.mhead_attention(
                 query = query_pre_features,
                 key = voxel_features_at_keys,
@@ -265,6 +274,7 @@ class SparseAttention3d(Attention3d):
                 key_padding_mask = key_mask,
             )
 
+        # NINA: feed_forward
         attend_features = self.drop_out(attend_features)
 
         new_features = attend_features.squeeze(0)
@@ -342,6 +352,7 @@ class SubMAttention3d(Attention3d):
         return _gather_dict
 
     def forward(self, sp_tensor, voxel_coords=None, key_coords=None, key_indices=None, key_mask=None):
+        # NINA: profile: gather
         if not sp_tensor.gather_dict:
             sp_tensor.gather_dict = self.create_gather_dict(self.attention_modes, sp_tensor.map_table, sp_tensor.indices, sp_tensor.spatial_shape)
 
@@ -359,6 +370,10 @@ class SubMAttention3d(Attention3d):
             key_indices = torch.cat(a_key_indices, dim = 1)
             key_mask = torch.cat(a_key_mask, dim = 1)
 
+        # NINA: end gather
+
+        # NINA: after: group + attention begin
+        # NINA: profile: before: group begin
         query_features = voxel_features.unsqueeze(0) # (1, N1+N2, C)
         if self.optimize_grouping_operation:
             key_features = votr_utils.grouping_operation_optimized(voxel_features, v_bs_cnt, key_indices, k_bs_cnt)
@@ -391,14 +406,19 @@ class SubMAttention3d(Attention3d):
             key_features = key_features.permute(1, 0, 2).contiguous() # (size, N1+N2, C)
         else:
             key_features = key_features.permute(2, 0, 1).contiguous() # (size, N1+N2, C)
+        # NINA: profile: before: group end
 
+        # NINA: profile: before: attention begin
         attend_features, attend_weights = self.mhead_attention(
             query = query_features,
             key = key_features,
             value = key_features,
             key_padding_mask = key_mask,
         )
+        # NINA: profile: before: attention end
+        # NINA: after: group + attention end
 
+        # NINA: feed forward
         attend_features = self.drop_out(attend_features)
         voxel_features = voxel_features + attend_features.squeeze(0)
         voxel_features = self.norm1(voxel_features)
